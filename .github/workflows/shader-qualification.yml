@@ -1,0 +1,2069 @@
+name: Shader qualification
+
+# Qualification is intentionally fail closed. The SwiftShader cell is a required
+# smoke gate but is not physical support evidence. Every physical cell is
+# blocking: unavailable runners, unsupported adapters, skips, timeouts, and
+# device loss are failures and never fall back to a hosted runner.
+on:
+  workflow_call:
+    inputs:
+      candidate_bundle_uri:
+        description: Immutable Azure Blob URI for the data-only qualification tar archive
+        required: true
+        type: string
+      candidate_bundle_sha256:
+        description: Lowercase SHA-256 digest of the qualification archive
+        required: true
+        type: string
+      qualification_id:
+        description: Stable correlation identifier for this qualification attempt
+        required: true
+        type: string
+      shader_abi_hash:
+        description: Expected lowercase shader ABI SHA-256 digest
+        required: true
+        type: string
+    secrets:
+      AZURE_CLIENT_ID:
+        description: Federated identity client ID with read-only candidate Blob access
+        required: true
+      AZURE_TENANT_ID:
+        description: Microsoft Entra tenant ID for the federated identity
+        required: true
+      AZURE_SUBSCRIPTION_ID:
+        description: Azure subscription containing model-storage candidate assets
+        required: true
+      RUNNER_SELECTOR_TOKEN:
+        description: Token with repository and organization runner read permission
+        required: true
+  workflow_dispatch:
+    inputs:
+      candidate_bundle_uri:
+        description: Immutable Azure Blob URI for the data-only qualification tar archive
+        required: true
+        type: string
+      candidate_bundle_sha256:
+        description: Lowercase SHA-256 digest of the qualification archive
+        required: true
+        type: string
+      qualification_id:
+        description: Stable correlation identifier for this qualification attempt
+        required: true
+        type: string
+      shader_abi_hash:
+        description: Expected lowercase shader ABI SHA-256 digest
+        required: true
+        type: string
+  repository_dispatch:
+    types:
+      - shader-qualification-requested
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: shader-qualification-${{ inputs.qualification_id || github.event.client_payload.qualification_id || github.run_id }}
+  cancel-in-progress: false
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  MATRIX_PATH: matrices/stable-webgpu-2026-07-13.json
+  CANDIDATE_BUNDLE_URI: ${{ inputs.candidate_bundle_uri || github.event.client_payload.candidate_bundle_uri }}
+  CANDIDATE_BUNDLE_SHA256: ${{ inputs.candidate_bundle_sha256 || github.event.client_payload.candidate_bundle_sha256 }}
+  QUALIFICATION_ID: ${{ inputs.qualification_id || github.event.client_payload.qualification_id }}
+  SHADER_ABI_HASH: ${{ inputs.shader_abi_hash || github.event.client_payload.shader_abi_hash }}
+
+jobs:
+  prepare:
+    name: Verify data-only candidate and matrix
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      artifact_name: ${{ steps.request.outputs.artifact_name }}
+      preflight_artifact_name: ${{ steps.request.outputs.preflight_artifact_name }}
+      qualification_id: ${{ steps.request.outputs.qualification_id }}
+      bundle_sha256: ${{ steps.request.outputs.bundle_sha256 }}
+      source_blob_host: ${{ steps.request.outputs.source_blob_host }}
+      source_blob_version_id: ${{ steps.request.outputs.source_blob_version_id }}
+      prepare_oidc_subject: ${{ steps.oidc-provenance.outputs.subject }}
+      prepare_oidc_issuer: ${{ steps.oidc-provenance.outputs.issuer }}
+      prepare_oidc_audience: ${{ steps.oidc-provenance.outputs.audience }}
+      prepare_oidc_verified_claims_sha256: ${{ steps.oidc-provenance.outputs.verified_claims_sha256 }}
+      prepare_oidc_verified_at: ${{ steps.oidc-provenance.outputs.verified_at }}
+      prepare_oidc_event_name: ${{ steps.oidc-provenance.outputs.event_name }}
+      prepare_oidc_job_workflow_ref: ${{ steps.oidc-provenance.outputs.job_workflow_ref }}
+      prepare_oidc_job_workflow_sha: ${{ steps.oidc-provenance.outputs.job_workflow_sha }}
+      harness_commit_sha: ${{ steps.harness-provenance.outputs.harness_commit_sha }}
+      harness_sha256: ${{ steps.harness-provenance.outputs.harness_sha256 }}
+      matrix_sha256: ${{ steps.matrix.outputs.matrix_sha256 }}
+      smoke_cells: ${{ steps.matrix.outputs.smoke_cells }}
+      physical_cells: ${{ steps.matrix.outputs.physical_cells }}
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Validate qualification request
+        id: request
+        shell: bash
+        env:
+          AZURE_CLIENT_ID_VALUE: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID_VALUE: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID_VALUE: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+
+          const qualificationId = process.env.QUALIFICATION_ID || "";
+          const runAttempt = process.env.GITHUB_RUN_ATTEMPT || "";
+          const bundleSha256 = process.env.CANDIDATE_BUNDLE_SHA256 || "";
+          const shaderAbiHash = process.env.SHADER_ABI_HASH || "";
+          const rawUri = process.env.CANDIDATE_BUNDLE_URI || "";
+          const azureIdentifiers = [
+            process.env.AZURE_CLIENT_ID_VALUE || "",
+            process.env.AZURE_TENANT_ID_VALUE || "",
+            process.env.AZURE_SUBSCRIPTION_ID_VALUE || "",
+          ];
+
+          if (!/^[a-z0-9][a-z0-9.-]{0,63}$/.test(qualificationId)) {
+            throw new Error("qualification_id must be a lowercase token up to 64 characters.");
+          }
+          if (!/^[1-9][0-9]{0,9}$/.test(runAttempt)) {
+            throw new Error("GITHUB_RUN_ATTEMPT must be a positive bounded integer.");
+          }
+          if (!/^[a-f0-9]{64}$/.test(bundleSha256)) {
+            throw new Error("candidate_bundle_sha256 must be a lowercase SHA-256 digest.");
+          }
+          if (!/^[a-f0-9]{64}$/.test(shaderAbiHash)) {
+            throw new Error("shader_abi_hash must be a lowercase SHA-256 digest.");
+          }
+          if (rawUri.length === 0 || rawUri.length > 2048) {
+            throw new Error("candidate_bundle_uri must be between 1 and 2048 characters.");
+          }
+          if (azureIdentifiers.some((value) => !/^[a-fA-F0-9-]{36}$/.test(value))) {
+            throw new Error("Azure OIDC client, tenant, and subscription IDs must be configured.");
+          }
+
+          const uri = new URL(rawUri);
+          if (uri.protocol !== "https:") {
+            throw new Error("candidate_bundle_uri must use HTTPS.");
+          }
+          if (!/^[a-z0-9]+[.]blob[.]core[.]windows[.]net$/.test(uri.hostname)) {
+            throw new Error("candidate_bundle_uri must reference approved Azure Blob storage.");
+          }
+          if (uri.username || uri.password || uri.hash) {
+            throw new Error("candidate_bundle_uri must not contain credentials or a fragment.");
+          }
+          if (uri.port) {
+            throw new Error("candidate_bundle_uri must use the standard HTTPS port.");
+          }
+
+          const accountName = uri.hostname.split(".")[0];
+          const pathSegments = uri.pathname.slice(1).split("/");
+          const containerName = pathSegments.shift() || "";
+          const blobName = pathSegments.join("/");
+          if (!/^[a-z0-9]{3,24}$/.test(accountName)) {
+            throw new Error("candidate_bundle_uri contains an invalid storage account name.");
+          }
+          if (!/^[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])$/.test(containerName)) {
+            throw new Error("candidate_bundle_uri contains an invalid Blob container name.");
+          }
+          if (
+            blobName.length === 0
+            || blobName.length > 1024
+            || !/^[A-Za-z0-9][A-Za-z0-9._/-]*[.]tar$/.test(blobName)
+            || blobName.split("/").some((segment) => segment === "" || segment === "." || segment === "..")
+          ) {
+            throw new Error("candidate_bundle_uri must identify a normalized .tar Blob path.");
+          }
+
+          const queryKeys = Array.from(uri.searchParams.keys());
+          const versionIds = uri.searchParams.getAll("versionid");
+          if (
+            queryKeys.length !== 1
+            || queryKeys[0] !== "versionid"
+            || versionIds.length !== 1
+            || !/^[A-Za-z0-9._:-]{1,128}$/.test(versionIds[0])
+          ) {
+            throw new Error(
+              "candidate_bundle_uri must contain exactly one immutable versionid and no SAS."
+            );
+          }
+
+          const output = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(output, "qualification_id=" + qualificationId + "\n");
+          fs.appendFileSync(output, "bundle_sha256=" + bundleSha256 + "\n");
+          const attemptIdentity = qualificationId + "-attempt-" + runAttempt;
+          fs.appendFileSync(output, "artifact_name=shader-candidate-" + attemptIdentity + "\n");
+          fs.appendFileSync(
+            output,
+            "preflight_artifact_name=shader-qualification-preflight-" + attemptIdentity + "\n"
+          );
+          fs.appendFileSync(output, "storage_account_name=" + accountName + "\n");
+          fs.appendFileSync(output, "storage_container_name=" + containerName + "\n");
+          fs.appendFileSync(output, "storage_blob_name=" + blobName + "\n");
+          fs.appendFileSync(output, "source_blob_host=" + uri.hostname + "\n");
+          fs.appendFileSync(output, "source_blob_version_id=" + versionIds[0] + "\n");
+          NODE
+
+      - name: Capture non-secret GitHub OIDC provenance claims
+        id: oidc-provenance
+        shell: bash
+        env:
+          # GitHub added these reusable-workflow identity fields after older
+          # actionlint schemas. Serialize the documented job context so the
+          # workflow remains lintable while retaining the exact identity.
+          TRUSTED_JOB_CONTEXT: ${{ toJSON(job) }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+
+          (async () => {
+          let trustedJobContext;
+          try {
+            trustedJobContext = JSON.parse(process.env.TRUSTED_JOB_CONTEXT || "");
+          } catch {
+            throw new Error("GitHub job workflow identity context is unavailable.");
+          }
+          const trustedWorkflowRef = String(trustedJobContext.workflow_ref || "");
+          const trustedWorkflowRepository = String(
+            trustedJobContext.workflow_repository || ""
+          );
+          const trustedWorkflowSha = String(trustedJobContext.workflow_sha || "");
+          const requiredTrustedWorkflowRef =
+            "Plasius-LTD/gpu-shader/.github/workflows/shader-qualification.yml@refs/heads/main";
+          const requestUrl = process.env.ACTIONS_ID_TOKEN_REQUEST_URL || "";
+          const requestToken = process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN || "";
+          if (!requestUrl || !requestToken) {
+            throw new Error("GitHub OIDC token acquisition is unavailable.");
+          }
+
+          const url = new URL(requestUrl);
+          if (
+            url.protocol !== "https:"
+            || !/^[a-z0-9-]+[.]actions[.]githubusercontent[.]com$/.test(url.hostname)
+            || url.username
+            || url.password
+            || url.port
+            || url.hash
+          ) {
+            throw new Error("GitHub OIDC request URL has an untrusted origin.");
+          }
+          url.searchParams.set("audience", "api://AzureADTokenExchange");
+          const response = await fetch(url, {
+            headers: { Authorization: "Bearer " + requestToken },
+          });
+          if (!response.ok) {
+            throw new Error("GitHub OIDC token acquisition failed.");
+          }
+
+          const token = String((await response.json()).value || "");
+          const parts = token.split(".");
+          if (parts.length !== 3) {
+            throw new Error("GitHub OIDC returned an invalid token.");
+          }
+          const claims = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+          const audience = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+          if (
+            claims.iss !== "https://token.actions.githubusercontent.com"
+            || !audience.includes("api://AzureADTokenExchange")
+            || !/^Plasius-LTD\/[A-Za-z0-9._-]{1,100}$/.test(String(claims.repository || ""))
+            || claims.repository !== process.env.GITHUB_REPOSITORY
+            || String(claims.run_id) !== process.env.GITHUB_RUN_ID
+            || String(claims.run_attempt) !== process.env.GITHUB_RUN_ATTEMPT
+            || !/^[a-f0-9]{40,64}$/.test(String(claims.sha || ""))
+            || String(claims.ref || "") !== process.env.GITHUB_REF
+            || typeof claims.sub !== "string"
+            || !claims.sub.startsWith("repo:" + process.env.GITHUB_REPOSITORY + ":")
+          ) {
+            throw new Error("GitHub OIDC claims do not match this trusted workflow run.");
+          }
+
+          const jobWorkflowRef = String(claims.job_workflow_ref || claims.workflow_ref || "");
+          const jobWorkflowSha = String(claims.job_workflow_sha || claims.workflow_sha || "");
+          if (
+            jobWorkflowRef !== requiredTrustedWorkflowRef
+            || !/^[a-f0-9]{40,64}$/.test(jobWorkflowSha)
+            || trustedWorkflowRepository !== "Plasius-LTD/gpu-shader"
+            || trustedWorkflowRef !== requiredTrustedWorkflowRef
+            || jobWorkflowSha !== trustedWorkflowSha
+          ) {
+            throw new Error("OIDC claims do not bind the trusted shader qualification workflow.");
+          }
+
+          const verifiedAt = new Date().toISOString();
+          const verifiedClaims = {
+            audience: "api://AzureADTokenExchange",
+            eventName: String(claims.event_name || ""),
+            issuer: claims.iss,
+            jobWorkflowRef,
+            jobWorkflowSha,
+            ref: String(claims.ref || ""),
+            repository: claims.repository,
+            repositoryId: String(claims.repository_id || ""),
+            runAttempt: Number(claims.run_attempt),
+            runId: String(claims.run_id),
+            sha: String(claims.sha || ""),
+            subject: claims.sub,
+          };
+          const verifiedClaimsSha256 = crypto
+            .createHash("sha256")
+            .update(JSON.stringify(verifiedClaims))
+            .digest("hex");
+          const provenance = {
+            repository: claims.repository,
+            commit: {
+              algorithm: String(claims.sha).length === 40 ? "sha1" : "sha256",
+              hex: String(claims.sha),
+            },
+            ref: String(claims.ref),
+            workflowRef: jobWorkflowRef,
+            workflowSha: {
+              algorithm: jobWorkflowSha.length === 40 ? "sha1" : "sha256",
+              hex: jobWorkflowSha,
+            },
+            runId: String(claims.run_id),
+            runAttempt: Number(claims.run_attempt),
+            job: "prepare",
+            eventName: String(claims.event_name || process.env.GITHUB_EVENT_NAME || ""),
+            oidcAttestation: {
+              issuer: claims.iss,
+              subject: claims.sub,
+              audience: "api://AzureADTokenExchange",
+              verifiedClaimsSha256,
+              verifiedAt,
+              source: "trusted-runner-preflight",
+            },
+          };
+          fs.mkdirSync("build-artifacts/trusted-provenance", { recursive: true });
+          fs.writeFileSync(
+            "build-artifacts/trusted-provenance/verified-claims.json",
+            JSON.stringify(provenance, null, 2) + "\n"
+          );
+          const output = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(output, "subject=" + claims.sub + "\n");
+          fs.appendFileSync(output, "issuer=" + claims.iss + "\n");
+          fs.appendFileSync(output, "audience=api://AzureADTokenExchange\n");
+          fs.appendFileSync(output, "verified_claims_sha256=" + verifiedClaimsSha256 + "\n");
+          fs.appendFileSync(output, "verified_at=" + verifiedAt + "\n");
+          fs.appendFileSync(output, "event_name=" + String(claims.event_name || process.env.GITHUB_EVENT_NAME || "") + "\n");
+          fs.appendFileSync(output, "job_workflow_ref=" + jobWorkflowRef + "\n");
+          fs.appendFileSync(output, "job_workflow_sha=" + jobWorkflowSha + "\n");
+          fs.appendFileSync(output, "job_context_workflow_sha=" + trustedWorkflowSha + "\n");
+          })().catch((error) => {
+            console.error(error);
+            process.exitCode = 1;
+          });
+          NODE
+
+      - name: Check out the OIDC-bound trusted harness
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          repository: Plasius-LTD/gpu-shader
+          ref: ${{ steps.oidc-provenance.outputs.job_workflow_sha }}
+          path: harness
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: harness/.nvmrc
+          cache: npm
+          cache-dependency-path: harness/package-lock.json
+
+      - name: Install and build the OIDC-bound trusted harness
+        working-directory: harness
+        run: |
+          npm ci --no-fund --no-audit
+          npm run build
+
+      - name: Verify and fingerprint the OIDC-bound trusted harness
+        id: harness-provenance
+        shell: bash
+        env:
+          SIGNED_WORKFLOW_SHA: ${{ steps.oidc-provenance.outputs.job_workflow_sha }}
+          INTENDED_WORKFLOW_SHA: ${{ steps.oidc-provenance.outputs.job_context_workflow_sha }}
+        run: |
+          set -euo pipefail
+          if [ "${SIGNED_WORKFLOW_SHA}" != "${INTENDED_WORKFLOW_SHA}" ]; then
+            echo "Signed and intended trusted workflow commits differ."
+            exit 1
+          fi
+          export PLASIUS_EXPECTED_HARNESS_COMMIT_SHA="${SIGNED_WORKFLOW_SHA}"
+          harness_sha256="$(node harness/scripts/fingerprint-trusted-harness.cjs harness)"
+          echo "harness_commit_sha=${SIGNED_WORKFLOW_SHA}" >> "${GITHUB_OUTPUT}"
+          echo "harness_sha256=${harness_sha256}" >> "${GITHUB_OUTPUT}"
+
+      - name: Authenticate private model-storage access with Azure OIDC
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          audience: api://AzureADTokenExchange
+
+      - name: Verify Azure accepted the configured federated identity
+        shell: bash
+        env:
+          EXPECTED_AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          EXPECTED_AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          EXPECTED_AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const { execFileSync } = require("node:child_process");
+          const account = JSON.parse(execFileSync(
+            "az", ["account", "show", "--output", "json", "--only-show-errors"],
+            { encoding: "utf8" }
+          ));
+          if (
+            String(account.id).toLowerCase()
+              !== process.env.EXPECTED_AZURE_SUBSCRIPTION_ID.toLowerCase()
+            || String(account.tenantId).toLowerCase()
+              !== process.env.EXPECTED_AZURE_TENANT_ID.toLowerCase()
+            || String(account.user?.name).toLowerCase()
+              !== process.env.EXPECTED_AZURE_CLIENT_ID.toLowerCase()
+            || String(account.user?.type).toLowerCase() !== "serviceprincipal"
+          ) {
+            throw new Error("Azure session does not match the configured OIDC federated identity.");
+          }
+          NODE
+
+      - name: Download and verify immutable candidate archive
+        shell: bash
+        env:
+          STORAGE_ACCOUNT_NAME: ${{ steps.request.outputs.storage_account_name }}
+          STORAGE_CONTAINER_NAME: ${{ steps.request.outputs.storage_container_name }}
+          STORAGE_BLOB_NAME: ${{ steps.request.outputs.storage_blob_name }}
+          SOURCE_BLOB_VERSION_ID: ${{ steps.request.outputs.source_blob_version_id }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-artifacts/request build-artifacts/candidate
+
+          az storage blob download --account-name "${STORAGE_ACCOUNT_NAME}" --container-name "${STORAGE_CONTAINER_NAME}" --name "${STORAGE_BLOB_NAME}" --version-id "${SOURCE_BLOB_VERSION_ID}" --auth-mode login --timeout 180 --file build-artifacts/request/candidate.tar --no-progress --output none --only-show-errors
+
+          node <<'NODE'
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+          const stat = fs.statSync("build-artifacts/request/candidate.tar");
+          if (!stat.isFile() || stat.size === 0 || stat.size > 268435456) {
+            throw new Error("Candidate archive exceeds the bounded download size.");
+          }
+          const bytes = fs.readFileSync("build-artifacts/request/candidate.tar");
+          const actual = crypto
+            .createHash("sha256")
+            .update(bytes)
+            .digest("hex");
+          if (actual !== process.env.CANDIDATE_BUNDLE_SHA256) {
+            throw new Error("Candidate archive SHA-256 does not match the qualification request.");
+          }
+          NODE
+
+      - name: Reject executable or unsafe candidate content
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar --list --file build-artifacts/request/candidate.tar > build-artifacts/request/archive-entries.txt
+          tar --list --verbose --numeric-owner --file build-artifacts/request/candidate.tar > build-artifacts/request/archive-entries-verbose.txt
+
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const entries = fs
+            .readFileSync("build-artifacts/request/archive-entries.txt", "utf8")
+            .split(/\r?\n/u)
+            .filter(Boolean);
+          if (entries.length === 0 || entries.length > 4096) {
+            throw new Error("Candidate archive must contain between 1 and 4096 entries.");
+          }
+
+          let hasQualificationManifest = false;
+          const uniqueEntries = new Set();
+          const portablePaths = new Map();
+          const pathKinds = new Map();
+          const requiredDirectories = new Set();
+          for (const entry of entries) {
+            if (
+              entry.startsWith("/")
+              || entry.includes("\\")
+              || !/^[A-Za-z0-9._/-]+\/?$/.test(entry)
+            ) {
+              throw new Error("Candidate archive contains an unsafe path.");
+            }
+            const segments = entry.replace(/\/$/u, "").split("/");
+            if (segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+              throw new Error("Candidate archive contains path traversal.");
+            }
+            const normalizedEntry = entry.replace(/\/$/u, "");
+            if (uniqueEntries.has(normalizedEntry)) {
+              throw new Error("Candidate archive contains a duplicate path.");
+            }
+            uniqueEntries.add(normalizedEntry);
+            const normalizedSegments = normalizedEntry.split("/");
+            for (let index = 1; index <= normalizedSegments.length; index += 1) {
+              const prefix = normalizedSegments.slice(0, index).join("/");
+              const foldedPrefix = prefix.toLowerCase();
+              const existingPrefix = portablePaths.get(foldedPrefix);
+              if (existingPrefix !== undefined && existingPrefix !== prefix) {
+                throw new Error("Candidate archive contains a case-folded path collision.");
+              }
+              portablePaths.set(foldedPrefix, prefix);
+              if (index < normalizedSegments.length) {
+                if (pathKinds.get(prefix) === "file") {
+                  throw new Error("Candidate archive nests content beneath a regular file.");
+                }
+                requiredDirectories.add(prefix);
+              }
+            }
+            const kind = entry.endsWith("/") ? "directory" : "file";
+            if (kind === "file" && requiredDirectories.has(normalizedEntry)) {
+              throw new Error("Candidate archive replaces a required directory with a file.");
+            }
+            pathKinds.set(normalizedEntry, kind);
+            if (entry.endsWith("/")) {
+              continue;
+            }
+            const extension = path.posix.extname(entry).toLowerCase();
+            if (![".json", ".wgsl", ".bin"].includes(extension)) {
+              throw new Error(
+                "Candidate archives are data-only; scripts and executable formats are forbidden."
+              );
+            }
+            if (entry === "qualification.json") {
+              hasQualificationManifest = true;
+            }
+          }
+          if (!hasQualificationManifest) {
+            throw new Error("Candidate archive must contain qualification.json at its root.");
+          }
+          NODE
+
+          if awk '{ type = substr($1, 1, 1); if (type != "-" && type != "d") invalid = 1; if (type == "-" && $1 ~ /[xst]/) invalid = 1; if ($3 !~ /^[0-9]+$/) invalid = 1; total += $3 } END { if (total > 268435456) invalid = 1; exit invalid ? 0 : 1 }' build-artifacts/request/archive-entries-verbose.txt; then
+            echo "Candidate archive contains an executable, oversized, linked, device, socket, or other non-data entry."
+            exit 1
+          fi
+
+          tar --extract --file build-artifacts/request/candidate.tar --directory build-artifacts/candidate --no-same-owner --no-same-permissions
+
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const root = path.resolve("build-artifacts/candidate");
+          const pending = [root];
+          let fileCount = 0;
+          let byteLength = 0;
+          while (pending.length > 0) {
+            const current = pending.pop();
+            for (const name of fs.readdirSync(current)) {
+              const candidate = path.join(current, name);
+              const stat = fs.lstatSync(candidate);
+              if (stat.isSymbolicLink()) {
+                throw new Error("Extracted candidate contains a symbolic link.");
+              }
+              if (stat.isDirectory()) {
+                pending.push(candidate);
+                continue;
+              }
+              if (!stat.isFile()) {
+                throw new Error("Extracted candidate contains a non-regular file.");
+              }
+              if ((stat.mode & 0o111) !== 0) {
+                throw new Error("Extracted candidate contains an executable file.");
+              }
+              fileCount += 1;
+              byteLength += stat.size;
+            }
+          }
+          if (fileCount === 0 || fileCount > 4096 || byteLength > 268435456) {
+            throw new Error("Extracted candidate exceeds the bounded file or byte budget.");
+          }
+          NODE
+
+      - name: Validate qualification envelope and compile-unit inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require("node:fs");
+          const envelope = JSON.parse(
+            fs.readFileSync("build-artifacts/candidate/qualification.json", "utf8")
+          );
+          if (envelope.contractVersion !== "1.0.0") {
+            throw new Error("qualification.json contractVersion must be 1.0.0.");
+          }
+          if (envelope.subject?.shaderAbiHash !== process.env.SHADER_ABI_HASH) {
+            throw new Error("qualification.json shaderAbiHash does not match the request.");
+          }
+          if (!envelope.inventory || !Array.isArray(envelope.inventory.compileUnits)) {
+            throw new Error("qualification.json must contain a compile-unit inventory.");
+          }
+          if (envelope.inventory.compileUnits.length === 0) {
+            throw new Error("qualification.json must contain at least one compile unit.");
+          }
+          NODE
+          node harness/dist/cli.js validate-inventory --inventory build-artifacts/candidate/qualification.json
+
+      - name: Validate and partition stable WebGPU matrix
+        id: matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          node harness/dist/cli.js validate-matrix --matrix "harness/${MATRIX_PATH}"
+          node <<'NODE'
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+
+          const matrixPath = "harness/" + process.env.MATRIX_PATH;
+          const bytes = fs.readFileSync(matrixPath);
+          const matrixSha256 = crypto.createHash("sha256").update(bytes).digest("hex");
+          if (matrixSha256 !== "9b47ff8162b055d49e38c4fe90b9074992ab8c9e1125926e936f8122e6119fd8") {
+            throw new Error("Stable WebGPU matrix differs from the exact approved 16-cell baseline.");
+          }
+          const matrix = JSON.parse(bytes.toString("utf8"));
+          const smoke = matrix.cells.filter((cell) => !cell.countsTowardStableCoverage);
+          const physical = matrix.cells.filter((cell) => cell.countsTowardStableCoverage);
+
+          if (
+            matrix.policy.requiredBlockingCellCount !== 16
+            || matrix.policy.requiredPhysicalCellCount !== 15
+            || matrix.cells.length !== 16
+            || smoke.length !== 1
+            || physical.length !== 15
+            || matrix.cells.some((cell) => cell.blocking !== true)
+          ) {
+            throw new Error("Matrix must contain one blocking smoke cell and 15 blocking physical cells.");
+          }
+          if (
+            smoke[0].cellId !== "swiftshader.chromium.ubuntu-x64"
+            || smoke[0].adapter.kind !== "software"
+            || physical.some((cell) => cell.adapter.kind !== "physical")
+          ) {
+            throw new Error("Matrix software/physical coverage classification is invalid.");
+          }
+
+          const forWorkflow = (cell) => ({
+            ...cell,
+            runnerLabelsJson: JSON.stringify(cell.runnerLabels),
+          });
+          const output = process.env.GITHUB_OUTPUT;
+          fs.appendFileSync(
+            output,
+            "matrix_sha256=" + matrixSha256 + "\n"
+          );
+          fs.appendFileSync(output, "smoke_cells=" + JSON.stringify(smoke.map(forWorkflow)) + "\n");
+          fs.appendFileSync(
+            output,
+            "physical_cells=" + JSON.stringify(physical.map(forWorkflow)) + "\n"
+          );
+          NODE
+
+      - name: Generate trusted qualification preflight evidence
+        shell: bash
+        env:
+          SOURCE_BLOB_URI_VALUE: ${{ env.CANDIDATE_BUNDLE_URI }}
+          BUNDLE_SHA256_VALUE: ${{ steps.request.outputs.bundle_sha256 }}
+          HARNESS_SHA256_VALUE: ${{ steps.harness-provenance.outputs.harness_sha256 }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-artifacts/qualification-preflight
+          node harness/dist/cli.js create-preflight-evidence --bundle build-artifacts/candidate --matrix "harness/${MATRIX_PATH}" --source-uri "${SOURCE_BLOB_URI_VALUE}" --bundle-sha256 "${BUNDLE_SHA256_VALUE}" --harness-sha256 "${HARNESS_SHA256_VALUE}" --verified-claims build-artifacts/trusted-provenance/verified-claims.json --output build-artifacts/qualification-preflight/qualification-preflight.json
+
+      - name: Upload trusted qualification preflight evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.request.outputs.preflight_artifact_name }}
+          path: build-artifacts/qualification-preflight
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload verified data-only candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: ${{ steps.request.outputs.artifact_name }}
+          path: build-artifacts/candidate
+          if-no-files-found: error
+          retention-days: 30
+
+  physical-runner-preflight:
+    name: Record physical runner availability (unavailable fails aggregate)
+    needs:
+      - prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      PLASIUS_CALLER_REPOSITORY: ${{ github.repository }}
+      PLASIUS_CALLER_REF: ${{ github.ref }}
+      PLASIUS_CALLER_SHA: ${{ github.sha }}
+      PLASIUS_WORKFLOW_RUN_ID: ${{ github.run_id }}
+      PLASIUS_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+      PLASIUS_WORKFLOW_REPOSITORY: Plasius-LTD/gpu-shader
+      PLASIUS_WORKFLOW_REF: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_ref }}
+      PLASIUS_WORKFLOW_SHA: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_sha }}
+    outputs:
+      available_cells: ${{ steps.finalize.outputs.available_cells }}
+      unavailable_count: ${{ steps.finalize.outputs.unavailable_count }}
+    steps:
+      - name: Create runner preflight evidence directory
+        shell: bash
+        run: mkdir -p build-artifacts/runner-preflight
+
+      - name: Download trusted qualification preflight evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ${{ needs.prepare.outputs.preflight_artifact_name }}
+          path: build-artifacts/qualification-preflight
+
+      - name: Inspect every required physical runner class
+        id: inventory
+        continue-on-error: true
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          PHYSICAL_CELLS: ${{ needs.prepare.outputs.physical_cells }}
+          RUNNER_SELECTOR_TOKEN_AVAILABLE: ${{ secrets.RUNNER_SELECTOR_TOKEN != '' }}
+          TRUSTED_WORKFLOW_REF: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_ref }}
+        with:
+          github-token: ${{ secrets.RUNNER_SELECTOR_TOKEN || github.token }}
+          script: |
+            const cells = JSON.parse(process.env.PHYSICAL_CELLS || "[]")
+            if (cells.length !== 15) {
+              throw new Error("The runner preflight requires exactly 15 physical cells.")
+            }
+
+            const runners = []
+            let inventoryFailure = null
+            const withTimeout = async (promise, timeoutMs) => {
+              let timer
+              try {
+                return await Promise.race([
+                  promise,
+                  new Promise((_, reject) => {
+                    timer = setTimeout(
+                      () => reject(new Error("runner inventory request timed out")),
+                      timeoutMs
+                    )
+                  }),
+                ])
+              } finally {
+                clearTimeout(timer)
+              }
+            }
+            if (process.env.RUNNER_SELECTOR_TOKEN_AVAILABLE !== "true") {
+              inventoryFailure = "runner-selector-token-unavailable"
+            } else {
+              try {
+                const repositoryRunners = await withTimeout(
+                  github.paginate(github.rest.actions.listSelfHostedRunnersForRepo, {
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    per_page: 100,
+                  }),
+                  60_000
+                )
+                const repositoryPrivate = context.payload.repository?.private
+                if (typeof repositoryPrivate !== "boolean") {
+                  throw new Error("caller repository visibility is unavailable")
+                }
+                const runnerGroups = await withTimeout(
+                  github.paginate(github.rest.actions.listSelfHostedRunnerGroupsForOrg, {
+                    org: context.repo.owner,
+                    visible_to_repository: context.repo.repo,
+                    per_page: 100,
+                  }),
+                  60_000
+                )
+                const accessibleGroupRunners = []
+                for (const group of runnerGroups) {
+                  if (!repositoryPrivate && group.allows_public_repositories !== true) {
+                    continue
+                  }
+                  if (
+                    group.restricted_to_workflows === true
+                    && !(group.selected_workflows || []).includes(
+                      process.env.TRUSTED_WORKFLOW_REF
+                    )
+                  ) {
+                    continue
+                  }
+                  accessibleGroupRunners.push(...await withTimeout(
+                    github.paginate(
+                      github.rest.actions.listSelfHostedRunnersInGroupForOrg,
+                      {
+                        org: context.repo.owner,
+                        runner_group_id: group.id,
+                        per_page: 100,
+                      }
+                    ),
+                    60_000
+                  ))
+                }
+                runners.push(...new Map(
+                  [...repositoryRunners, ...accessibleGroupRunners]
+                    .map((runner) => [String(runner.id), runner])
+                ).values())
+              } catch (error) {
+                inventoryFailure = "runner-inventory-api-unavailable"
+                core.warning(
+                  "Physical runner inventory could not be verified; affected cells fail closed. "
+                    + error.message
+                )
+              }
+            }
+
+            const results = cells.map((cell) => {
+              const expected = cell.runnerLabels.map((label) => label.toLowerCase())
+              const matches = runners.filter((runner) => {
+                const labels = new Set(
+                  (runner.labels || []).map((label) => label.name.toLowerCase())
+                )
+                return (
+                  runner.status === "online"
+                  && expected.every((label) => labels.has(label))
+                )
+              })
+              const available = inventoryFailure === null && matches.length > 0
+              return {
+                cellId: cell.cellId,
+                status: available ? "available" : "runner-unavailable",
+                reason: available ? null : (inventoryFailure || "no-online-runner-with-exact-label-class"),
+                requiredRunnerLabels: cell.runnerLabels,
+                matchedRunners: Array.from(
+                  new Map(matches.map((runner) => [String(runner.name || ""), {
+                    name: String(runner.name || ""),
+                    labels: (runner.labels || []).map((label) => String(label.name || "")),
+                  }])).values()
+                ).filter((runner) => runner.name && runner.labels.every(Boolean)),
+              }
+            })
+
+            core.setOutput("results", JSON.stringify(results))
+
+      - name: Finalize per-cell availability evidence and runnable matrix
+        id: finalize
+        if: ${{ always() }}
+        shell: bash
+        env:
+          PHYSICAL_CELLS: ${{ needs.prepare.outputs.physical_cells }}
+          RUNNER_RESULTS: ${{ steps.inventory.outputs.results }}
+          QUALIFICATION_ID_VALUE: ${{ needs.prepare.outputs.qualification_id }}
+          MATRIX_SHA256_VALUE: ${{ needs.prepare.outputs.matrix_sha256 }}
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const directory = path.join("build-artifacts", "runner-preflight");
+          const qualificationPreflight = JSON.parse(
+            fs.readFileSync(
+              path.join("build-artifacts", "qualification-preflight", "qualification-preflight.json"),
+              "utf8"
+            )
+          );
+          if (
+            qualificationPreflight.kind !== "shader-qualification-preflight"
+            || qualificationPreflight.qualificationId !== process.env.QUALIFICATION_ID_VALUE
+            || qualificationPreflight.matrixSha256 !== process.env.MATRIX_SHA256_VALUE
+            || !qualificationPreflight.provenance
+          ) {
+            throw new Error("Trusted qualification preflight evidence is inconsistent.");
+          }
+          const cells = JSON.parse(process.env.PHYSICAL_CELLS || "[]");
+          if (cells.length !== 15) {
+            throw new Error("Runner preflight cannot finalize without the exact 15 physical cells.");
+          }
+
+          let rawResults = null;
+          try {
+            rawResults = JSON.parse(process.env.RUNNER_RESULTS || "null");
+          } catch {
+            rawResults = null;
+          }
+          const statuses = new Map(
+            Array.isArray(rawResults)
+              ? rawResults.map((result) => [result.cellId, result])
+              : []
+          );
+          const gitObject = (value, label) => {
+            if (/^[a-f0-9]{40}$/.test(value)) return { algorithm: "sha1", hex: value };
+            if (/^[a-f0-9]{64}$/.test(value)) return { algorithm: "sha256", hex: value };
+            throw new Error(label + " is not a lowercase Git object ID.");
+          };
+          const required = (name) => {
+            const value = process.env[name] || "";
+            if (!value) throw new Error(name + " is required for trusted preflight evidence.");
+            return value;
+          };
+          const producer = {
+            repository: required("PLASIUS_CALLER_REPOSITORY"),
+            commit: gitObject(required("PLASIUS_CALLER_SHA"), "PLASIUS_CALLER_SHA"),
+            ref: required("PLASIUS_CALLER_REF"),
+            runId: required("PLASIUS_WORKFLOW_RUN_ID"),
+            runAttempt: Number(required("PLASIUS_WORKFLOW_RUN_ATTEMPT")),
+            job: "physical-runner-preflight",
+            trustedWorkflowRepository: required("PLASIUS_WORKFLOW_REPOSITORY"),
+            trustedWorkflowRef: required("PLASIUS_WORKFLOW_REF"),
+            trustedWorkflowSha: gitObject(
+              required("PLASIUS_WORKFLOW_SHA"),
+              "PLASIUS_WORKFLOW_SHA"
+            ),
+            runner: {
+              name: required("RUNNER_NAME"),
+              environment: required("RUNNER_ENVIRONMENT"),
+              os: required("RUNNER_OS"),
+              architecture: required("RUNNER_ARCH"),
+            },
+          };
+          const provenance = qualificationPreflight.provenance;
+          if (
+            producer.repository !== provenance.repository
+            || producer.commit.algorithm !== provenance.commit.algorithm
+            || producer.commit.hex !== provenance.commit.hex
+            || producer.ref !== provenance.ref
+            || producer.runId !== provenance.runId
+            || producer.runAttempt !== provenance.runAttempt
+            || producer.trustedWorkflowRef !== provenance.workflowRef
+            || producer.trustedWorkflowSha.algorithm !== provenance.workflowSha.algorithm
+            || producer.trustedWorkflowSha.hex !== provenance.workflowSha.hex
+            || !Number.isSafeInteger(producer.runAttempt)
+            || producer.runAttempt < 1
+          ) {
+            throw new Error("Runner-preflight producer differs from qualification provenance.");
+          }
+          const availableCells = [];
+          for (const cell of cells) {
+            const recorded = statuses.get(cell.cellId);
+            const available = recorded?.status === "available";
+            const result = {
+              kind: "shader-runner-cell-preflight-evidence",
+              contractVersion: "1.0.0",
+              qualificationId: process.env.QUALIFICATION_ID_VALUE,
+              cellId: cell.cellId,
+              status: available ? "available" : "runner-unavailable",
+              matrixSha256: process.env.MATRIX_SHA256_VALUE,
+              runnerLabels: cell.runnerLabels,
+              matchedRunners: Array.isArray(recorded?.matchedRunners)
+                ? recorded.matchedRunners
+                : [],
+              adapterHarness: null,
+              qualificationPreflightProvenance: qualificationPreflight.provenance,
+              producer,
+            };
+            fs.writeFileSync(
+              path.join(directory, cell.cellId + ".json"),
+              JSON.stringify(result, null, 2) + "\n"
+            );
+            if (available) {
+              availableCells.push(cell);
+            }
+          }
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            "available_cells=" + JSON.stringify(availableCells) + "\n"
+          );
+          fs.appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            "unavailable_count=" + String(15 - availableCells.length) + "\n"
+          );
+          NODE
+
+      - name: Upload physical runner preflight evidence
+        id: upload
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: shader-runner-preflight-${{ needs.prepare.outputs.qualification_id }}-attempt-${{ github.run_attempt }}-physical
+          path: build-artifacts/runner-preflight
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce preflight evidence capture
+        if: ${{ always() }}
+        shell: bash
+        env:
+          FINALIZE_OUTCOME: ${{ steps.finalize.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        run: |
+          if [ "${FINALIZE_OUTCOME}" != "success" ] || [ "${UPLOAD_OUTCOME}" != "success" ]; then
+            echo "Physical runner availability could not be captured; qualification fails closed."
+            exit 1
+          fi
+
+  swiftshader:
+    name: SwiftShader smoke / ${{ matrix.cell.cellId }} (required, non-physical)
+    needs:
+      - prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        cell: ${{ fromJSON(needs.prepare.outputs.smoke_cells) }}
+    runs-on: ${{ fromJSON(matrix.cell.runnerLabelsJson) }}
+    timeout-minutes: 30
+    env:
+      PLASIUS_QUALIFICATION_ID: ${{ needs.prepare.outputs.qualification_id }}
+      PLASIUS_CANDIDATE_BUNDLE_SHA256: ${{ needs.prepare.outputs.bundle_sha256 }}
+      PLASIUS_MATRIX_SHA256: ${{ needs.prepare.outputs.matrix_sha256 }}
+      PLASIUS_HARNESS_COMMIT_SHA: ${{ needs.prepare.outputs.harness_commit_sha }}
+      PLASIUS_HARNESS_SHA256: ${{ needs.prepare.outputs.harness_sha256 }}
+      PLASIUS_SOURCE_BLOB_HOST: ${{ needs.prepare.outputs.source_blob_host }}
+      PLASIUS_SOURCE_BLOB_VERSION_ID: ${{ needs.prepare.outputs.source_blob_version_id }}
+      PLASIUS_SOURCE_BLOB_OIDC_VERIFIED_BY_PREPARE: "true"
+      PLASIUS_SOURCE_BLOB_PREPARE_JOB: prepare
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_SUBJECT: ${{ needs.prepare.outputs.prepare_oidc_subject }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_ISSUER: ${{ needs.prepare.outputs.prepare_oidc_issuer }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_AUDIENCE: ${{ needs.prepare.outputs.prepare_oidc_audience }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_VERIFIED_CLAIMS_SHA256: ${{ needs.prepare.outputs.prepare_oidc_verified_claims_sha256 }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_VERIFIED_AT: ${{ needs.prepare.outputs.prepare_oidc_verified_at }}
+      PLASIUS_SOURCE_BLOB_PREPARE_EVENT_NAME: ${{ needs.prepare.outputs.prepare_oidc_event_name }}
+      PLASIUS_SOURCE_BLOB_PREPARE_WORKFLOW_REF: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_ref }}
+      PLASIUS_SOURCE_BLOB_PREPARE_WORKFLOW_SHA: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_sha }}
+      PLASIUS_WORKFLOW_REPOSITORY: Plasius-LTD/gpu-shader
+      PLASIUS_WORKFLOW_REF: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_ref }}
+      PLASIUS_WORKFLOW_SHA: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_sha }}
+      PLASIUS_CALLER_REPOSITORY: ${{ github.repository }}
+      PLASIUS_CALLER_REF: ${{ github.ref }}
+      PLASIUS_CALLER_SHA: ${{ github.sha }}
+      PLASIUS_WORKFLOW_RUN_ID: ${{ github.run_id }}
+      PLASIUS_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: Initialize typed SwiftShader failure outcome
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          CELL_JSON: ${{ toJSON(matrix.cell) }}
+          CELL_JOB: swiftshader
+          CELL_EVIDENCE_DIRECTORY: build-artifacts/evidence
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ACTUAL_RUNNER_OS: ${{ runner.os }}
+          ACTUAL_RUNNER_ARCH: ${{ runner.arch }}
+        with:
+          script: |
+            const fs = require("node:fs")
+            const path = require("node:path")
+            const required = (name) => {
+              const value = String(process.env[name] || "").trim()
+              if (!value) throw new Error(name + " is required for typed cell failure evidence.")
+              return value
+            }
+            const gitObject = (value, label) => {
+              if (/^[a-f0-9]{40}$/.test(value)) return { algorithm: "sha1", hex: value }
+              if (/^[a-f0-9]{64}$/.test(value)) return { algorithm: "sha256", hex: value }
+              throw new Error(label + " is not a lowercase Git object ID.")
+            }
+            const positiveInteger = (value, label) => {
+              const parsed = Number(value)
+              if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(label + " is invalid.")
+              return parsed
+            }
+            const cell = JSON.parse(required("CELL_JSON"))
+            const cellId = String(cell.cellId || "")
+            if (!/^[a-z0-9][a-z0-9.-]{0,127}$/.test(cellId) || cell.adapter?.kind !== "software") {
+              throw new Error("SwiftShader fallback received an invalid matrix cell.")
+            }
+            const provenance = {
+              repository: required("PLASIUS_CALLER_REPOSITORY"),
+              commit: gitObject(required("PLASIUS_CALLER_SHA"), "PLASIUS_CALLER_SHA"),
+              ref: required("PLASIUS_CALLER_REF"),
+              workflowRef: required("PLASIUS_WORKFLOW_REF"),
+              workflowSha: gitObject(required("PLASIUS_WORKFLOW_SHA"), "PLASIUS_WORKFLOW_SHA"),
+              runId: required("PLASIUS_WORKFLOW_RUN_ID"),
+              runAttempt: positiveInteger(required("PLASIUS_WORKFLOW_RUN_ATTEMPT"), "run attempt"),
+              job: "prepare",
+              eventName: required("PLASIUS_SOURCE_BLOB_PREPARE_EVENT_NAME"),
+              oidcAttestation: {
+                issuer: required("PLASIUS_SOURCE_BLOB_PREPARE_OIDC_ISSUER"),
+                subject: required("PLASIUS_SOURCE_BLOB_PREPARE_OIDC_SUBJECT"),
+                audience: required("PLASIUS_SOURCE_BLOB_PREPARE_OIDC_AUDIENCE"),
+                verifiedClaimsSha256: required("PLASIUS_SOURCE_BLOB_PREPARE_OIDC_VERIFIED_CLAIMS_SHA256"),
+                verifiedAt: required("PLASIUS_SOURCE_BLOB_PREPARE_OIDC_VERIFIED_AT"),
+                source: "trusted-runner-preflight",
+              },
+            }
+            const diagnostic = {
+              contractVersion: "1.0.0",
+              kind: "non-qualifying-workflow-diagnostic",
+              qualificationId: required("PLASIUS_QUALIFICATION_ID"),
+              cellId,
+              status: "failed",
+              matrixSha256: required("PLASIUS_MATRIX_SHA256"),
+              message: "Required SwiftShader qualification did not produce a complete passing cell result; inspect the trusted step outcomes.",
+              qualificationPreflightProvenance: provenance,
+              producer: {
+                repository: provenance.repository,
+                commit: provenance.commit,
+                ref: provenance.ref,
+                runId: provenance.runId,
+                runAttempt: provenance.runAttempt,
+                job: required("CELL_JOB"),
+                trustedWorkflowRepository: required("PLASIUS_WORKFLOW_REPOSITORY"),
+                trustedWorkflowRef: provenance.workflowRef,
+                trustedWorkflowSha: provenance.workflowSha,
+                runner: {
+                  name: required("RUNNER_NAME"),
+                  environment: required("ACTUAL_RUNNER_ENVIRONMENT"),
+                  os: required("ACTUAL_RUNNER_OS"),
+                  architecture: required("ACTUAL_RUNNER_ARCH"),
+                },
+              },
+            }
+            const directory = path.resolve(required("CELL_EVIDENCE_DIRECTORY"))
+            fs.rmSync(directory, { recursive: true, force: true })
+            fs.mkdirSync(directory, { recursive: true })
+            const output = path.join(directory, cellId + ".fallback.json")
+            const temporary = output + ".tmp"
+            fs.writeFileSync(temporary, JSON.stringify(diagnostic, null, 2) + "\n", { flag: "wx" })
+            fs.linkSync(temporary, output)
+            fs.unlinkSync(temporary)
+
+      - name: Check out the fixed trusted harness
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          repository: Plasius-LTD/gpu-shader
+          ref: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_sha }}
+          path: harness
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: harness/.nvmrc
+          cache: npm
+          cache-dependency-path: harness/package-lock.json
+
+      - name: Install and build the fixed trusted harness
+        working-directory: harness
+        run: |
+          npm ci --no-fund --no-audit
+          npm run build
+
+      - name: Verify exact trusted harness fingerprint
+        env:
+          PLASIUS_EXPECTED_HARNESS_COMMIT_SHA: ${{ needs.prepare.outputs.harness_commit_sha }}
+        run: >-
+          node harness/scripts/fingerprint-trusted-harness.cjs
+          harness
+          "${{ needs.prepare.outputs.harness_sha256 }}"
+
+      - name: Download verified data-only candidate
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact_name }}
+          path: candidate
+
+      - name: Download trusted qualification preflight evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ${{ needs.prepare.outputs.preflight_artifact_name }}
+          path: build-artifacts/qualification-preflight
+
+      - name: Verify hosted smoke routing
+        shell: bash
+        env:
+          CELL_JSON: ${{ toJSON(matrix.cell) }}
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ACTUAL_RUNNER_OS: ${{ runner.os }}
+          ACTUAL_RUNNER_ARCH: ${{ runner.arch }}
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const cell = JSON.parse(process.env.CELL_JSON);
+          if (
+            cell.cellId !== "swiftshader.chromium.ubuntu-x64"
+            || cell.blocking !== true
+            || cell.countsTowardStableCoverage !== false
+            || cell.adapter.kind !== "software"
+            || cell.browser.name !== "chromium"
+            || cell.browser.channel !== "playwright-bundled"
+            || cell.adapter.vendor !== "google"
+            || cell.adapter.family !== "swiftshader"
+            || cell.adapter.backend !== "swiftshader"
+            || cell.os.name !== "ubuntu"
+            || cell.os.versionRequirement.kind !== "exact"
+            || cell.os.versionRequirement.value !== "24.04"
+            || cell.os.architecture !== "x64"
+            || JSON.stringify(cell.runnerLabels) !== JSON.stringify(["ubuntu-24.04"])
+            || process.env.ACTUAL_RUNNER_ENVIRONMENT !== "github-hosted"
+            || process.env.ACTUAL_RUNNER_OS !== "Linux"
+            || process.env.ACTUAL_RUNNER_ARCH !== "X64"
+          ) {
+            throw new Error("SwiftShader smoke runner or matrix metadata is invalid.");
+          }
+          NODE
+
+      - name: Install pinned Playwright Chromium
+        working-directory: harness
+        run: node node_modules/playwright-core/cli.js install --with-deps chromium
+
+      - name: Create hosted runner preflight evidence
+        shell: bash
+        env:
+          CELL_ID: ${{ matrix.cell.cellId }}
+        run: |
+          set -euo pipefail
+          mkdir -p build-artifacts/runner-preflight build-artifacts/evidence
+          node harness/dist/cli.js create-hosted-runner-preflight --matrix "harness/${MATRIX_PATH}" --cell "${CELL_ID}" --preflight build-artifacts/qualification-preflight/qualification-preflight.json --output "build-artifacts/runner-preflight/${CELL_ID}.json"
+
+      - name: Upload hosted runner preflight evidence
+        id: preflight-upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: shader-runner-preflight-${{ needs.prepare.outputs.qualification_id }}-attempt-${{ github.run_attempt }}-${{ matrix.cell.cellId }}
+          path: build-artifacts/runner-preflight
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Execute fixed SwiftShader qualification harness
+        id: qualify
+        continue-on-error: true
+        shell: bash
+        env:
+          CELL_ID: ${{ matrix.cell.cellId }}
+        run: |
+          node harness/scripts/run-workflow-cell.cjs --cli harness/dist/cli.js --bundle candidate --matrix "harness/${MATRIX_PATH}" --cell "${CELL_ID}" --preflight build-artifacts/qualification-preflight/qualification-preflight.json --runner-preflight "build-artifacts/runner-preflight/${CELL_ID}.json" --evidence-dir build-artifacts/evidence
+
+      - name: Select exactly one typed SwiftShader cell outcome
+        id: finalize-outcome
+        if: ${{ always() }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          CELL_ID: ${{ matrix.cell.cellId }}
+          CELL_EVIDENCE_DIRECTORY: build-artifacts/evidence
+        with:
+          script: |
+            const fs = require("node:fs")
+            const path = require("node:path")
+            const directory = path.resolve(process.env.CELL_EVIDENCE_DIRECTORY || "")
+            const cellId = process.env.CELL_ID || ""
+            fs.mkdirSync(directory, { recursive: true })
+            const parsed = []
+            for (const name of fs.readdirSync(directory).filter((value) => value.endsWith(".json"))) {
+              const file = path.join(directory, name)
+              try {
+                const value = JSON.parse(fs.readFileSync(file, "utf8"))
+                if (value?.cellId === cellId && value?.qualificationId === process.env.PLASIUS_QUALIFICATION_ID) {
+                  parsed.push({ file, name, value })
+                }
+              } catch {}
+            }
+            const cellEvidence = parsed.find(({ name, value }) =>
+              name === cellId + ".json"
+              && Array.isArray(value.results)
+              && value.producer
+              && value.qualificationPreflightProvenance
+            )
+            const diagnostics = parsed.filter(({ value }) =>
+              value.kind === "non-qualifying-workflow-diagnostic"
+              && (value.status === "failed" || value.status === "timeout")
+            ).sort((left, right) => {
+              const rank = (entry) => entry.name.endsWith(".watchdog.json") ? 0
+                : entry.name.endsWith(".failure.json") ? 1 : 2
+              return rank(left) - rank(right) || left.name.localeCompare(right.name)
+            })
+            const selected = cellEvidence || diagnostics[0]
+            if (!selected) throw new Error("No complete typed SwiftShader cell outcome exists.")
+            for (const name of fs.readdirSync(directory).filter((value) => value.endsWith(".json"))) {
+              const file = path.join(directory, name)
+              if (file !== selected.file) fs.rmSync(file, { force: true })
+            }
+
+      - name: Upload SwiftShader evidence
+        id: upload
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: shader-evidence-${{ needs.prepare.outputs.qualification_id }}-attempt-${{ github.run_attempt }}-${{ matrix.cell.cellId }}
+          path: build-artifacts/evidence
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce SwiftShader smoke result
+        if: ${{ always() }}
+        shell: bash
+        env:
+          QUALIFY_OUTCOME: ${{ steps.qualify.outcome }}
+          FINALIZE_OUTCOME: ${{ steps.finalize-outcome.outcome }}
+          PREFLIGHT_UPLOAD_OUTCOME: ${{ steps.preflight-upload.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        run: |
+          if [ "${QUALIFY_OUTCOME}" != "success" ] || [ "${FINALIZE_OUTCOME}" != "success" ] || [ "${PREFLIGHT_UPLOAD_OUTCOME}" != "success" ] || [ "${UPLOAD_OUTCOME}" != "success" ]; then
+            echo "Required SwiftShader smoke qualification failed."
+            exit 1
+          fi
+
+  physical:
+    name: Physical stable WebGPU / ${{ matrix.cell.cellId }} (unavailable is failure)
+    if: ${{ needs.physical-runner-preflight.outputs.unavailable_count != '15' }}
+    needs:
+      - prepare
+      - physical-runner-preflight
+    strategy:
+      fail-fast: false
+      max-parallel: 15
+      matrix:
+        cell: ${{ fromJSON(needs.physical-runner-preflight.outputs.available_cells) }}
+    # Deliberately no runner selector or fallback: every label set maps to one
+    # required physical hardware class. Missing classes are explicit failed
+    # preflight evidence and are never routed to a substitute runner.
+    runs-on: ${{ fromJSON(matrix.cell.runnerLabelsJson) }}
+    timeout-minutes: 45
+    env:
+      PLASIUS_QUALIFICATION_ID: ${{ needs.prepare.outputs.qualification_id }}
+      PLASIUS_CANDIDATE_BUNDLE_SHA256: ${{ needs.prepare.outputs.bundle_sha256 }}
+      PLASIUS_MATRIX_SHA256: ${{ needs.prepare.outputs.matrix_sha256 }}
+      PLASIUS_HARNESS_COMMIT_SHA: ${{ needs.prepare.outputs.harness_commit_sha }}
+      PLASIUS_HARNESS_SHA256: ${{ needs.prepare.outputs.harness_sha256 }}
+      PLASIUS_SOURCE_BLOB_HOST: ${{ needs.prepare.outputs.source_blob_host }}
+      PLASIUS_SOURCE_BLOB_VERSION_ID: ${{ needs.prepare.outputs.source_blob_version_id }}
+      PLASIUS_SOURCE_BLOB_OIDC_VERIFIED_BY_PREPARE: "true"
+      PLASIUS_SOURCE_BLOB_PREPARE_JOB: prepare
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_SUBJECT: ${{ needs.prepare.outputs.prepare_oidc_subject }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_ISSUER: ${{ needs.prepare.outputs.prepare_oidc_issuer }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_AUDIENCE: ${{ needs.prepare.outputs.prepare_oidc_audience }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_VERIFIED_CLAIMS_SHA256: ${{ needs.prepare.outputs.prepare_oidc_verified_claims_sha256 }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_VERIFIED_AT: ${{ needs.prepare.outputs.prepare_oidc_verified_at }}
+      PLASIUS_SOURCE_BLOB_PREPARE_EVENT_NAME: ${{ needs.prepare.outputs.prepare_oidc_event_name }}
+      PLASIUS_SOURCE_BLOB_PREPARE_WORKFLOW_REF: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_ref }}
+      PLASIUS_SOURCE_BLOB_PREPARE_WORKFLOW_SHA: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_sha }}
+      PLASIUS_WORKFLOW_REPOSITORY: Plasius-LTD/gpu-shader
+      PLASIUS_WORKFLOW_REF: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_ref }}
+      PLASIUS_WORKFLOW_SHA: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_sha }}
+      PLASIUS_CALLER_REPOSITORY: ${{ github.repository }}
+      PLASIUS_CALLER_REF: ${{ github.ref }}
+      PLASIUS_CALLER_SHA: ${{ github.sha }}
+      PLASIUS_WORKFLOW_RUN_ID: ${{ github.run_id }}
+      PLASIUS_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: Initialize isolated physical cell workspace and typed failure outcome
+        id: initialize-cell
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          CELL_JSON: ${{ toJSON(matrix.cell) }}
+          CELL_JOB: physical
+          CELL_ROOT: ${{ runner.temp }}/plasius-shader-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cell.cellId }}
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ACTUAL_RUNNER_OS: ${{ runner.os }}
+          ACTUAL_RUNNER_ARCH: ${{ runner.arch }}
+        with:
+          script: |
+            const fs = require("node:fs")
+            const path = require("node:path")
+            const required = (name) => {
+              const value = String(process.env[name] || "").trim()
+              if (!value) throw new Error(name + " is required for typed cell failure evidence.")
+              return value
+            }
+            const gitObject = (value, label) => {
+              if (/^[a-f0-9]{40}$/.test(value)) return { algorithm: "sha1", hex: value }
+              if (/^[a-f0-9]{64}$/.test(value)) return { algorithm: "sha256", hex: value }
+              throw new Error(label + " is not a lowercase Git object ID.")
+            }
+            const positiveInteger = (value, label) => {
+              const parsed = Number(value)
+              if (!Number.isSafeInteger(parsed) || parsed < 1) throw new Error(label + " is invalid.")
+              return parsed
+            }
+            const cell = JSON.parse(required("CELL_JSON"))
+            const cellId = String(cell.cellId || "")
+            if (!/^[a-z0-9][a-z0-9.-]{0,127}$/.test(cellId) || cell.adapter?.kind !== "physical") {
+              throw new Error("Physical fallback received an invalid matrix cell.")
+            }
+            const runnerTemp = fs.realpathSync(path.resolve(required("RUNNER_TEMP")))
+            const root = path.resolve(required("CELL_ROOT"))
+            const child = path.relative(runnerTemp, root)
+            if (!child || child.startsWith("..") || path.isAbsolute(child)) {
+              throw new Error("Physical cell workspace must be a child of RUNNER_TEMP.")
+            }
+            fs.rmSync(root, { recursive: true, force: true })
+            const directory = path.join(root, "evidence")
+            fs.mkdirSync(directory, { recursive: true })
+            const provenance = {
+              repository: required("PLASIUS_CALLER_REPOSITORY"),
+              commit: gitObject(required("PLASIUS_CALLER_SHA"), "PLASIUS_CALLER_SHA"),
+              ref: required("PLASIUS_CALLER_REF"),
+              workflowRef: required("PLASIUS_WORKFLOW_REF"),
+              workflowSha: gitObject(required("PLASIUS_WORKFLOW_SHA"), "PLASIUS_WORKFLOW_SHA"),
+              runId: required("PLASIUS_WORKFLOW_RUN_ID"),
+              runAttempt: positiveInteger(required("PLASIUS_WORKFLOW_RUN_ATTEMPT"), "run attempt"),
+              job: "prepare",
+              eventName: required("PLASIUS_SOURCE_BLOB_PREPARE_EVENT_NAME"),
+              oidcAttestation: {
+                issuer: required("PLASIUS_SOURCE_BLOB_PREPARE_OIDC_ISSUER"),
+                subject: required("PLASIUS_SOURCE_BLOB_PREPARE_OIDC_SUBJECT"),
+                audience: required("PLASIUS_SOURCE_BLOB_PREPARE_OIDC_AUDIENCE"),
+                verifiedClaimsSha256: required("PLASIUS_SOURCE_BLOB_PREPARE_OIDC_VERIFIED_CLAIMS_SHA256"),
+                verifiedAt: required("PLASIUS_SOURCE_BLOB_PREPARE_OIDC_VERIFIED_AT"),
+                source: "trusted-runner-preflight",
+              },
+            }
+            const diagnostic = {
+              contractVersion: "1.0.0",
+              kind: "non-qualifying-workflow-diagnostic",
+              qualificationId: required("PLASIUS_QUALIFICATION_ID"),
+              cellId,
+              status: "failed",
+              matrixSha256: required("PLASIUS_MATRIX_SHA256"),
+              message: "Required physical qualification did not produce a complete passing cell result; inspect the trusted step outcomes.",
+              qualificationPreflightProvenance: provenance,
+              producer: {
+                repository: provenance.repository,
+                commit: provenance.commit,
+                ref: provenance.ref,
+                runId: provenance.runId,
+                runAttempt: provenance.runAttempt,
+                job: required("CELL_JOB"),
+                trustedWorkflowRepository: required("PLASIUS_WORKFLOW_REPOSITORY"),
+                trustedWorkflowRef: provenance.workflowRef,
+                trustedWorkflowSha: provenance.workflowSha,
+                runner: {
+                  name: required("RUNNER_NAME"),
+                  environment: required("ACTUAL_RUNNER_ENVIRONMENT"),
+                  os: required("ACTUAL_RUNNER_OS"),
+                  architecture: required("ACTUAL_RUNNER_ARCH"),
+                },
+              },
+            }
+            const output = path.join(directory, cellId + ".fallback.json")
+            const temporary = output + ".tmp"
+            fs.writeFileSync(temporary, JSON.stringify(diagnostic, null, 2) + "\n", { flag: "wx" })
+            fs.linkSync(temporary, output)
+            fs.unlinkSync(temporary)
+
+      - name: Check out the fixed trusted harness
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          repository: Plasius-LTD/gpu-shader
+          ref: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_sha }}
+          path: harness
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: harness/.nvmrc
+          cache: npm
+          cache-dependency-path: harness/package-lock.json
+
+      - name: Install the fixed trusted harness
+        working-directory: harness
+        run: npm ci --no-fund --no-audit
+
+      - name: Build the fixed trusted harness
+        working-directory: harness
+        run: npm run build
+
+      - name: Verify exact trusted harness fingerprint
+        env:
+          PLASIUS_EXPECTED_HARNESS_COMMIT_SHA: ${{ needs.prepare.outputs.harness_commit_sha }}
+        run: >-
+          node harness/scripts/fingerprint-trusted-harness.cjs
+          harness
+          "${{ needs.prepare.outputs.harness_sha256 }}"
+
+      - name: Download verified data-only candidate
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact_name }}
+          path: ${{ runner.temp }}/plasius-shader-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cell.cellId }}/candidate
+
+      - name: Download trusted qualification preflight evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ${{ needs.prepare.outputs.preflight_artifact_name }}
+          path: ${{ runner.temp }}/plasius-shader-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cell.cellId }}/qualification-preflight
+
+      - name: Download API-verified physical runner preflight evidence
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: shader-runner-preflight-${{ needs.prepare.outputs.qualification_id }}-attempt-${{ github.run_attempt }}-physical
+          path: ${{ runner.temp }}/plasius-shader-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cell.cellId }}/runner-preflight
+
+      - name: Fail-closed physical device preflight
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          CELL_JSON: ${{ toJSON(matrix.cell) }}
+          ACTUAL_RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          ACTUAL_RUNNER_OS: ${{ runner.os }}
+          ACTUAL_RUNNER_ARCH: ${{ runner.arch }}
+        with:
+          script: |
+            const cell = JSON.parse(process.env.CELL_JSON)
+            const required = (name) => {
+              const value = process.env[name]
+              if (!value) {
+                throw new Error(name + " is required on every physical shader-validation runner.")
+              }
+              return value
+            }
+            if (
+              process.env.ACTUAL_RUNNER_ENVIRONMENT !== "self-hosted"
+              || cell.adapter.kind !== "physical"
+              || cell.blocking !== true
+              || cell.countsTowardStableCoverage !== true
+              || !cell.runnerLabels.includes("self-hosted")
+              || !cell.runnerLabels.includes("physical-gpu")
+            ) {
+              throw new Error("Physical qualification was routed to an invalid runner class.")
+            }
+            const expectedHostOs = cell.runnerLabels.find((label) =>
+              ["Linux", "Windows", "macOS"].includes(label)
+            )
+            const expectedHostArch = cell.runnerLabels.find((label) =>
+              ["X64", "ARM64"].includes(label)
+            )
+            if (
+              expectedHostOs !== process.env.ACTUAL_RUNNER_OS
+              || expectedHostArch !== process.env.ACTUAL_RUNNER_ARCH
+            ) {
+              throw new Error("Physical runner OS or architecture does not match its label contract.")
+            }
+            const adapterUrl = new URL(required("PLASIUS_TRUSTED_FLEET_ADAPTER_URL"))
+            if (
+              adapterUrl.protocol !== "file:"
+              || adapterUrl.username
+              || adapterUrl.password
+              || adapterUrl.search
+              || adapterUrl.hash
+              || !adapterUrl.pathname.endsWith(".mjs")
+              || !/^[a-f0-9]{64}$/.test(required("PLASIUS_TRUSTED_FLEET_ADAPTER_SHA256"))
+            ) {
+              throw new Error("Physical runner adapter preload identity is malformed.")
+            }
+            const cellIds = required("PLASIUS_SHADER_CELL_IDS")
+              .split(",")
+              .map((value) => value.trim())
+              .filter(Boolean)
+            if (!cellIds.includes(cell.cellId)) {
+              throw new Error("Physical runner is not provisioned for this matrix cell.")
+            }
+            if (required("PLASIUS_SHADER_PHYSICAL_GPU").toLowerCase() !== "true") {
+              throw new Error("Physical runner did not attest physical GPU availability.")
+            }
+            if (required("PLASIUS_SHADER_GPU_VENDOR").toLowerCase() !== cell.adapter.vendor) {
+              throw new Error("Physical runner GPU vendor does not match the matrix.")
+            }
+            if (required("PLASIUS_SHADER_GPU_BACKEND").toLowerCase() !== cell.adapter.backend) {
+              throw new Error("Physical runner GPU backend does not match the matrix.")
+            }
+            if (
+              required("PLASIUS_SHADER_AUTOMATION_KIND").toLowerCase()
+              !== cell.automation.kind
+            ) {
+              throw new Error("Physical runner automation driver does not match the matrix.")
+            }
+
+      - name: Execute fixed physical qualification harness
+        id: qualify
+        continue-on-error: true
+        run: >-
+          node harness/scripts/run-workflow-cell.cjs
+          --cli harness/dist/cli.js
+          --bundle "${{ runner.temp }}/plasius-shader-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cell.cellId }}/candidate"
+          --matrix "harness/matrices/stable-webgpu-2026-07-13.json"
+          --cell "${{ matrix.cell.cellId }}"
+          --preflight "${{ runner.temp }}/plasius-shader-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cell.cellId }}/qualification-preflight/qualification-preflight.json"
+          --runner-preflight "${{ runner.temp }}/plasius-shader-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cell.cellId }}/runner-preflight/${{ matrix.cell.cellId }}.json"
+          --evidence-dir "${{ runner.temp }}/plasius-shader-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cell.cellId }}/evidence"
+
+      - name: Select exactly one typed physical cell outcome
+        id: finalize-outcome
+        if: ${{ always() }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          CELL_ID: ${{ matrix.cell.cellId }}
+          CELL_EVIDENCE_DIRECTORY: ${{ runner.temp }}/plasius-shader-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cell.cellId }}/evidence
+        with:
+          script: |
+            const fs = require("node:fs")
+            const path = require("node:path")
+            const directory = path.resolve(process.env.CELL_EVIDENCE_DIRECTORY || "")
+            const cellId = process.env.CELL_ID || ""
+            fs.mkdirSync(directory, { recursive: true })
+            const parsed = []
+            for (const name of fs.readdirSync(directory).filter((value) => value.endsWith(".json"))) {
+              const file = path.join(directory, name)
+              try {
+                const value = JSON.parse(fs.readFileSync(file, "utf8"))
+                if (value?.cellId === cellId && value?.qualificationId === process.env.PLASIUS_QUALIFICATION_ID) {
+                  parsed.push({ file, name, value })
+                }
+              } catch {}
+            }
+            const cellEvidence = parsed.find(({ name, value }) =>
+              name === cellId + ".json"
+              && Array.isArray(value.results)
+              && value.producer
+              && value.qualificationPreflightProvenance
+            )
+            const diagnostics = parsed.filter(({ value }) =>
+              value.kind === "non-qualifying-workflow-diagnostic"
+              && (value.status === "failed" || value.status === "timeout")
+            ).sort((left, right) => {
+              const rank = (entry) => entry.name.endsWith(".watchdog.json") ? 0
+                : entry.name.endsWith(".failure.json") ? 1 : 2
+              return rank(left) - rank(right) || left.name.localeCompare(right.name)
+            })
+            const selected = cellEvidence || diagnostics[0]
+            if (!selected) throw new Error("No complete typed physical cell outcome exists.")
+            for (const name of fs.readdirSync(directory).filter((value) => value.endsWith(".json"))) {
+              const file = path.join(directory, name)
+              if (file !== selected.file) fs.rmSync(file, { force: true })
+            }
+
+      - name: Upload physical qualification evidence
+        id: upload
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: shader-evidence-${{ needs.prepare.outputs.qualification_id }}-attempt-${{ github.run_attempt }}-${{ matrix.cell.cellId }}
+          path: ${{ runner.temp }}/plasius-shader-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cell.cellId }}/evidence
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove isolated physical cell workspace
+        id: cleanup-cell
+        if: ${{ always() }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          CELL_ROOT: ${{ runner.temp }}/plasius-shader-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.cell.cellId }}
+        with:
+          script: |
+            const fs = require("node:fs")
+            const path = require("node:path")
+            const root = path.resolve(process.env.CELL_ROOT || "")
+            const runnerTemp = fs.realpathSync(path.resolve(process.env.RUNNER_TEMP || ""))
+            const child = path.relative(runnerTemp, root)
+            if (!child || child.startsWith("..") || path.isAbsolute(child)) {
+              throw new Error("Refusing to clean a path outside RUNNER_TEMP.")
+            }
+            fs.rmSync(root, { recursive: true, force: true })
+
+      - name: Enforce physical qualification result
+        if: ${{ always() }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          QUALIFY_OUTCOME: ${{ steps.qualify.outcome }}
+          FINALIZE_OUTCOME: ${{ steps.finalize-outcome.outcome }}
+          CLEANUP_OUTCOME: ${{ steps.cleanup-cell.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        with:
+          script: |
+            if (
+              process.env.QUALIFY_OUTCOME !== "success"
+              || process.env.FINALIZE_OUTCOME !== "success"
+              || process.env.CLEANUP_OUTCOME !== "success"
+              || process.env.UPLOAD_OUTCOME !== "success"
+            ) {
+              core.setFailed("Required physical qualification failed; unsupported or unavailable is not a skip.")
+            }
+
+  aggregate:
+    name: Exact compile-unit x cell qualification gate
+    if: ${{ always() }}
+    needs:
+      - prepare
+      - physical-runner-preflight
+      - swiftshader
+      - physical
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      attestations: write
+      contents: read
+      id-token: write
+    env:
+      AGGREGATE_QUALIFICATION_ID: ${{ needs.prepare.outputs.qualification_id || github.run_id }}
+      PLASIUS_QUALIFICATION_ID: ${{ needs.prepare.outputs.qualification_id }}
+      PLASIUS_CANDIDATE_BUNDLE_SHA256: ${{ needs.prepare.outputs.bundle_sha256 }}
+      PLASIUS_MATRIX_SHA256: ${{ needs.prepare.outputs.matrix_sha256 }}
+      PLASIUS_HARNESS_COMMIT_SHA: ${{ needs.prepare.outputs.harness_commit_sha }}
+      PLASIUS_HARNESS_SHA256: ${{ needs.prepare.outputs.harness_sha256 }}
+      PLASIUS_SOURCE_BLOB_HOST: ${{ needs.prepare.outputs.source_blob_host }}
+      PLASIUS_SOURCE_BLOB_VERSION_ID: ${{ needs.prepare.outputs.source_blob_version_id }}
+      PLASIUS_SOURCE_BLOB_OIDC_VERIFIED_BY_PREPARE: "true"
+      PLASIUS_SOURCE_BLOB_PREPARE_JOB: prepare
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_SUBJECT: ${{ needs.prepare.outputs.prepare_oidc_subject }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_ISSUER: ${{ needs.prepare.outputs.prepare_oidc_issuer }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_AUDIENCE: ${{ needs.prepare.outputs.prepare_oidc_audience }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_VERIFIED_CLAIMS_SHA256: ${{ needs.prepare.outputs.prepare_oidc_verified_claims_sha256 }}
+      PLASIUS_SOURCE_BLOB_PREPARE_OIDC_VERIFIED_AT: ${{ needs.prepare.outputs.prepare_oidc_verified_at }}
+      PLASIUS_SOURCE_BLOB_PREPARE_EVENT_NAME: ${{ needs.prepare.outputs.prepare_oidc_event_name }}
+      PLASIUS_SOURCE_BLOB_PREPARE_WORKFLOW_REF: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_ref }}
+      PLASIUS_SOURCE_BLOB_PREPARE_WORKFLOW_SHA: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_sha }}
+      PLASIUS_WORKFLOW_REPOSITORY: Plasius-LTD/gpu-shader
+      PLASIUS_WORKFLOW_REF: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_ref }}
+      PLASIUS_WORKFLOW_SHA: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_sha }}
+      PLASIUS_CALLER_REPOSITORY: ${{ github.repository }}
+      PLASIUS_CALLER_REF: ${{ github.ref }}
+      PLASIUS_CALLER_SHA: ${{ github.sha }}
+      PLASIUS_WORKFLOW_RUN_ID: ${{ github.run_id }}
+      PLASIUS_WORKFLOW_RUN_ATTEMPT: ${{ github.run_attempt }}
+    steps:
+      - name: Check out the fixed trusted harness
+        id: checkout
+        continue-on-error: true
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          repository: Plasius-LTD/gpu-shader
+          ref: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_sha }}
+          path: harness
+          persist-credentials: false
+
+      - name: Set up Node.js
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: harness/.nvmrc
+          cache: npm
+          cache-dependency-path: harness/package-lock.json
+
+      - name: Install and build the fixed trusted harness
+        id: harness
+        if: ${{ always() && steps.checkout.outcome == 'success' }}
+        continue-on-error: true
+        working-directory: harness
+        run: |
+          npm ci --no-fund --no-audit
+          npm run build
+
+      - name: Verify exact trusted harness fingerprint
+        id: harness-fingerprint
+        if: ${{ always() && steps.harness.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          PLASIUS_EXPECTED_HARNESS_COMMIT_SHA: ${{ needs.prepare.outputs.harness_commit_sha }}
+        run: >-
+          node harness/scripts/fingerprint-trusted-harness.cjs
+          harness
+          "${{ needs.prepare.outputs.harness_sha256 }}"
+
+      - name: Download verified data-only candidate
+        id: candidate
+        if: ${{ always() && needs.prepare.outputs.artifact_name != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ${{ needs.prepare.outputs.artifact_name }}
+          path: candidate
+
+      - name: Download all cell evidence
+        id: evidence
+        if: ${{ always() }}
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: shader-evidence-${{ needs.prepare.outputs.qualification_id }}-attempt-${{ github.run_attempt }}-*
+          path: build-artifacts/cell-evidence
+          merge-multiple: true
+
+      - name: Download trusted qualification preflight evidence
+        id: qualification-preflight-evidence
+        if: ${{ always() && needs.prepare.outputs.preflight_artifact_name != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: ${{ needs.prepare.outputs.preflight_artifact_name }}
+          path: build-artifacts/runner-preflight
+
+      - name: Download all runner preflight evidence
+        id: preflight-evidence
+        if: ${{ always() && needs.prepare.outputs.qualification_id != '' }}
+        continue-on-error: true
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          pattern: shader-runner-preflight-${{ needs.prepare.outputs.qualification_id }}-attempt-${{ github.run_attempt }}-*
+          path: build-artifacts/runner-preflight
+          merge-multiple: true
+
+      - name: Retain the exact versioned matrix artifact
+        id: matrix-artifact
+        if: ${{ always() && steps.harness-fingerprint.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build-artifacts/aggregate
+          cp "harness/${MATRIX_PATH}" build-artifacts/aggregate/stable-webgpu-matrix.json
+
+      - name: Aggregate exact Cartesian-product evidence
+        id: aggregate
+        if: ${{ always() && steps.harness-fingerprint.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          mkdir -p build-artifacts/aggregate
+          node harness/dist/cli.js aggregate-evidence --bundle candidate --matrix "harness/${MATRIX_PATH}" --evidence-dir build-artifacts/cell-evidence --preflight-evidence-dir build-artifacts/runner-preflight --output build-artifacts/aggregate/qualification-evidence.json
+
+      - name: Validate aggregate evidence
+        id: validate
+        if: ${{ always() && steps.aggregate.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          node harness/dist/cli.js validate-evidence --bundle candidate --matrix "harness/${MATRIX_PATH}" --evidence build-artifacts/aggregate/qualification-evidence.json
+
+      - name: Require every Cartesian-product result to pass
+        id: passed
+        if: ${{ always() && steps.validate.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const evidence = JSON.parse(
+            fs.readFileSync("build-artifacts/aggregate/qualification-evidence.json", "utf8")
+          );
+          const matrix = JSON.parse(
+            fs.readFileSync("build-artifacts/aggregate/stable-webgpu-matrix.json", "utf8")
+          );
+          const counts = evidence.counts || {};
+          const requiredCells = Number(matrix.policy?.requiredBlockingCellCount);
+          const expectedResults = Number(counts.compileUnits) * requiredCells;
+          const pairs = new Set(
+            Array.isArray(evidence.results)
+              ? evidence.results.map((result) => result.compileUnitId + "\0" + result.cellId)
+              : []
+          );
+          if (
+            evidence.status !== "passed"
+            || !Number.isSafeInteger(counts.compileUnits)
+            || counts.compileUnits < 1
+            || !Number.isSafeInteger(requiredCells)
+            || requiredCells < 1
+            || !Array.isArray(matrix.cells)
+            || matrix.cells.length !== requiredCells
+            || counts.cells !== requiredCells
+            || counts.expectedResults !== expectedResults
+            || counts.passedResults !== expectedResults
+            || !Array.isArray(evidence.results)
+            || evidence.results.length !== expectedResults
+            || pairs.size !== expectedResults
+            || evidence.results.some((result) => result.status !== "passed")
+          ) {
+            throw new Error(
+              "Stable delivery requires every compile-unit x matrix-cell result to pass."
+            );
+          }
+          NODE
+
+      - name: Attest exact aggregate qualification evidence
+        id: evidence-attestation
+        if: >-
+          ${{
+            always()
+            && needs.prepare.result == 'success'
+            && needs.physical-runner-preflight.result == 'success'
+            && needs.swiftshader.result == 'success'
+            && needs.physical.result == 'success'
+            && steps.passed.outcome == 'success'
+          }}
+        continue-on-error: true
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
+        with:
+          subject-path: build-artifacts/aggregate/qualification-evidence.json
+
+      - name: Retain strict aggregate attestation reference and bundle
+        id: attestation-ref
+        if: ${{ always() && steps.evidence-attestation.outcome == 'success' }}
+        continue-on-error: true
+        shell: bash
+        env:
+          ATTESTATION_ID: ${{ steps.evidence-attestation.outputs.attestation-id }}
+          ATTESTATION_URL: ${{ steps.evidence-attestation.outputs.attestation-url }}
+          ATTESTATION_BUNDLE_PATH: ${{ steps.evidence-attestation.outputs.bundle-path }}
+          CALLER_REPOSITORY: ${{ github.repository }}
+          TRUSTED_WORKFLOW_REF: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_ref }}
+          TRUSTED_WORKFLOW_SHA: ${{ needs.prepare.outputs.prepare_oidc_job_workflow_sha }}
+        run: |
+          node <<'NODE'
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+          const path = require("node:path");
+
+          const attestationId = process.env.ATTESTATION_ID || "";
+          const attestationUrl = new URL(process.env.ATTESTATION_URL || "");
+          const sourceBundlePath = process.env.ATTESTATION_BUNDLE_PATH || "";
+          const callerRepository = process.env.CALLER_REPOSITORY || "";
+          const workflowRef = process.env.TRUSTED_WORKFLOW_REF || "";
+          const workflowSha = process.env.TRUSTED_WORKFLOW_SHA || "";
+          const runId = process.env.GITHUB_RUN_ID || "";
+          const runAttempt = Number(process.env.GITHUB_RUN_ATTEMPT);
+          if (
+            !/^[A-Za-z0-9._:-]{1,256}$/.test(attestationId)
+            || !/^Plasius-LTD\/[A-Za-z0-9._-]{1,100}$/.test(callerRepository)
+            || attestationUrl.protocol !== "https:"
+            || attestationUrl.hostname !== "github.com"
+            || !attestationUrl.pathname.startsWith("/" + callerRepository + "/attestations/")
+            || !/^Plasius-LTD\/gpu-shader\/\.github\/workflows\/shader-qualification[.]yml@/.test(workflowRef)
+            || !/^[a-f0-9]{40,64}$/.test(workflowSha)
+            || !/^[1-9][0-9]*$/.test(runId)
+            || !Number.isSafeInteger(runAttempt)
+            || runAttempt < 1
+          ) {
+            throw new Error("Aggregate attestation identity or trusted workflow binding is invalid.");
+          }
+
+          const evidencePath = path.join(
+            "build-artifacts", "aggregate", "qualification-evidence.json"
+          );
+          const retainedBundlePath = path.join(
+            "build-artifacts", "aggregate", "qualification-evidence.attestation.bundle.json"
+          );
+          const sourceBundleStat = fs.statSync(sourceBundlePath);
+          if (
+            !sourceBundleStat.isFile()
+            || sourceBundleStat.size === 0
+            || sourceBundleStat.size > 10_485_760
+          ) {
+            throw new Error("GitHub attestation bundle is missing or exceeds its bounded size.");
+          }
+          fs.copyFileSync(sourceBundlePath, retainedBundlePath);
+
+          const sha256 = (file) => crypto
+            .createHash("sha256")
+            .update(fs.readFileSync(file))
+            .digest("hex");
+          const reference = {
+            contractVersion: "1.0.0",
+            kind: "shader-validation-evidence-attestation-ref",
+            evidence: {
+              name: "qualification-evidence.json",
+              sha256: sha256(evidencePath),
+            },
+            attestation: {
+              id: attestationId,
+              url: attestationUrl.toString(),
+              bundle: {
+                name: "qualification-evidence.attestation.bundle.json",
+                sha256: sha256(retainedBundlePath),
+              },
+            },
+            producer: {
+              repository: callerRepository,
+              runId,
+              runAttempt,
+              trustedWorkflowRepository: "Plasius-LTD/gpu-shader",
+              trustedWorkflowRef: workflowRef,
+              trustedWorkflowSha: {
+                algorithm: workflowSha.length === 40 ? "sha1" : "sha256",
+                hex: workflowSha,
+              },
+            },
+          };
+          fs.writeFileSync(
+            path.join(
+              "build-artifacts", "aggregate", "qualification-evidence.attestation-ref.json"
+            ),
+            JSON.stringify(reference, null, 2) + "\n"
+          );
+          NODE
+
+      - name: Record aggregate failure diagnostics
+        if: ${{ always() }}
+        shell: bash
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          RUNNER_PREFLIGHT_RESULT: ${{ needs.physical-runner-preflight.result }}
+          SWIFTSHADER_RESULT: ${{ needs.swiftshader.result }}
+          PHYSICAL_RESULT: ${{ needs.physical.result }}
+          CHECKOUT_OUTCOME: ${{ steps.checkout.outcome }}
+          HARNESS_OUTCOME: ${{ steps.harness.outcome }}
+          CANDIDATE_OUTCOME: ${{ steps.candidate.outcome }}
+          EVIDENCE_OUTCOME: ${{ steps.evidence.outcome }}
+          PREFLIGHT_EVIDENCE_OUTCOME: ${{ steps.preflight-evidence.outcome }}
+          QUALIFICATION_PREFLIGHT_OUTCOME: ${{ steps.qualification-preflight-evidence.outcome }}
+          HARNESS_FINGERPRINT_OUTCOME: ${{ steps.harness-fingerprint.outcome }}
+          MATRIX_ARTIFACT_OUTCOME: ${{ steps.matrix-artifact.outcome }}
+          AGGREGATE_OUTCOME: ${{ steps.aggregate.outcome }}
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+          PASSED_OUTCOME: ${{ steps.passed.outcome }}
+          ATTESTATION_OUTCOME: ${{ steps.evidence-attestation.outcome }}
+          ATTESTATION_REF_OUTCOME: ${{ steps.attestation-ref.outcome }}
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = require("node:path");
+          const directory = path.join("build-artifacts", "aggregate");
+          const evidencePath = path.join(directory, "qualification-evidence.json");
+          fs.mkdirSync(directory, { recursive: true });
+          if (!fs.existsSync(evidencePath)) {
+            fs.writeFileSync(
+              path.join(directory, "workflow-failure.txt"),
+              [
+                "Shader qualification failed before exact Cartesian evidence was available.",
+                "qualificationId=" + process.env.AGGREGATE_QUALIFICATION_ID,
+                "prepare=" + process.env.PREPARE_RESULT,
+                "runnerPreflight=" + process.env.RUNNER_PREFLIGHT_RESULT,
+                "swiftshader=" + process.env.SWIFTSHADER_RESULT,
+                "physical=" + process.env.PHYSICAL_RESULT,
+                "checkout=" + process.env.CHECKOUT_OUTCOME,
+                "harness=" + process.env.HARNESS_OUTCOME,
+                "candidate=" + process.env.CANDIDATE_OUTCOME,
+                "evidenceDownload=" + process.env.EVIDENCE_OUTCOME,
+                "preflightEvidenceDownload=" + process.env.PREFLIGHT_EVIDENCE_OUTCOME,
+                "qualificationPreflightDownload="
+                  + process.env.QUALIFICATION_PREFLIGHT_OUTCOME,
+                "harnessFingerprint=" + process.env.HARNESS_FINGERPRINT_OUTCOME,
+                "matrixArtifact=" + process.env.MATRIX_ARTIFACT_OUTCOME,
+                "aggregate=" + process.env.AGGREGATE_OUTCOME,
+                "validate=" + process.env.VALIDATE_OUTCOME,
+                "allResultsPassed=" + process.env.PASSED_OUTCOME,
+                "",
+              ].join("\n")
+            );
+          }
+          if (
+            fs.existsSync(evidencePath)
+            && (
+              process.env.ATTESTATION_OUTCOME !== "success"
+              || process.env.ATTESTATION_REF_OUTCOME !== "success"
+            )
+          ) {
+            fs.writeFileSync(
+              path.join(directory, "attestation-failure.txt"),
+              "Aggregate evidence exists but cryptographic attestation failed.\n"
+                + "attestation=" + process.env.ATTESTATION_OUTCOME + "\n"
+                + "attestationRef=" + process.env.ATTESTATION_REF_OUTCOME + "\n"
+            );
+          }
+          NODE
+
+      - name: Upload aggregate qualification evidence
+        id: upload
+        if: ${{ always() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: shader-qualification-${{ env.AGGREGATE_QUALIFICATION_ID }}-attempt-${{ github.run_attempt }}-aggregate
+          path: build-artifacts/aggregate
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce complete blocking qualification
+        if: ${{ always() }}
+        shell: bash
+        env:
+          PREPARE_RESULT: ${{ needs.prepare.result }}
+          RUNNER_PREFLIGHT_RESULT: ${{ needs.physical-runner-preflight.result }}
+          SWIFTSHADER_RESULT: ${{ needs.swiftshader.result }}
+          PHYSICAL_RESULT: ${{ needs.physical.result }}
+          AGGREGATE_OUTCOME: ${{ steps.aggregate.outcome }}
+          VALIDATE_OUTCOME: ${{ steps.validate.outcome }}
+          PASSED_OUTCOME: ${{ steps.passed.outcome }}
+          ATTESTATION_OUTCOME: ${{ steps.evidence-attestation.outcome }}
+          ATTESTATION_REF_OUTCOME: ${{ steps.attestation-ref.outcome }}
+          HARNESS_FINGERPRINT_OUTCOME: ${{ steps.harness-fingerprint.outcome }}
+          QUALIFICATION_PREFLIGHT_OUTCOME: ${{ steps.qualification-preflight-evidence.outcome }}
+          PREFLIGHT_EVIDENCE_OUTCOME: ${{ steps.preflight-evidence.outcome }}
+          MATRIX_ARTIFACT_OUTCOME: ${{ steps.matrix-artifact.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+        run: |
+          set -euo pipefail
+          for outcome in "${PREPARE_RESULT}" "${RUNNER_PREFLIGHT_RESULT}" "${SWIFTSHADER_RESULT}" "${PHYSICAL_RESULT}" "${HARNESS_FINGERPRINT_OUTCOME}" "${QUALIFICATION_PREFLIGHT_OUTCOME}" "${PREFLIGHT_EVIDENCE_OUTCOME}" "${MATRIX_ARTIFACT_OUTCOME}" "${AGGREGATE_OUTCOME}" "${VALIDATE_OUTCOME}" "${PASSED_OUTCOME}" "${ATTESTATION_OUTCOME}" "${ATTESTATION_REF_OUTCOME}" "${UPLOAD_OUTCOME}"; do
+            if [ "${outcome}" != "success" ]; then
+              echo "Shader qualification is incomplete; every blocking cell and compile unit must pass."
+              exit 1
+            fi
+          done

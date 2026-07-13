@@ -1,0 +1,9 @@
+export * from "./contracts.js";
+export { canonicalizeGpuContract, parseCanonicalJson } from "./canonical-json.js";
+export { asSha256Hex, computeGpuAbiHash, computeSha256, computeShaderManifestCoreSha256 } from "./hash.js";
+export { createGpuRecordCodec } from "./codec/codec.js";
+export { validateModelShaderCompatibility } from "./compatibility.js";
+export { parseGpuInterfaceManifest, parseJsonBytes, parseModelGpuCompatibilityDescriptor, parseShaderStyleProfileManifest, parseShaderVersionManifest, parseShaderVersionManifestCore } from "./manifest-validation.js";
+export { loadShaderStyleProfile } from "./runtime/catalog-loader.js";
+export { prepareStyleProfile } from "./runtime/profile-preparer.js";
+export { activateStyleProfile, createShaderStyleController } from "./runtime/style-controller.js";

@@ -1,0 +1,92 @@
+# Changelog
+
+All notable changes to this project are documented in this file.
+
+The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+Release sections are created and promoted by the approved release workflow; do
+not manually create a versioned release section.
+
+## [Unreleased]
+
+### Added
+
+- Initial browser-safe contracts for reflected GPU interfaces, immutable shader
+  versions, exact-version style profiles, model compatibility, and typed
+  diagnostics.
+- Strict final-WGSL reflection, deterministic ABI hashes, generated TypeScript
+  artifacts, and CPU record codecs through the Node-only build subpath.
+- Promoted-catalog loading, digest verification, device compatibility checks,
+  asynchronous pipeline preparation, and atomic frame-boundary style switching.
+- Compile-unit inventory, a versioned stable-WebGPU matrix, declarative bounded
+  qualification fixtures, per-cell evidence, and fail-closed aggregation
+  contracts.
+- Mandatory universal evidence plus scoped additive qualification evidence and
+  independent evidence/attestation identity for every supplemental scope, and
+  exact matrix-policy-pinned profile requirements for targets such as XR. The
+  initial additive-policy registry is empty and fails closed until reviewed
+  supplemental lanes and exact policy bytes ship in a later framework release.
+- Mandatory reflected `buffer-record` and `vertex-input` qualification probes,
+  with strict texture upload/view/copy layouts and bounded resource execution.
+- Requirement derivation from exact WGSL enables, reflected model semantics,
+  per-stage resources and binding sizes, inter-stage variables/components, compute
+  workgroup dimensions/invocations/statically used storage bytes, and structural
+  pipeline features/formats/limits at admission and runtime.
+- Exact candidate/preflight/runner/cell/matrix/aggregate evidence flow with
+  external build-provenance references for immutable model-storage admission.
+- Preload-only, fixed-root, digest-bound physical fleet adapter registration
+  that records actual runner labels and execution automation identity.
+- Repository governance, architecture and technical decision records, testing
+  policy, legal files, public-package verification, and protected CI/CD release
+  workflows.
+
+### Changed
+
+- Reflection provenance now obtains the package version from release-owned
+  package metadata rather than caller input.
+- Shader evidence is admitted before exact-version style profiles, avoiding a
+  profile/evidence/shader digest cycle while preserving profile validation.
+- Release metadata now lands only through a protected, auto-merged pull request.
+  A metadata-changing run stops before publication because its workflow-dispatch
+  SHA no longer equals the prepared commit; a second `bump: none` run from the
+  new `main` performs exact-commit validation and publication.
+- Release validation and packing now run without write, production-environment,
+  npm, attestation, or OIDC privileges and emit one exact digest-bound transport
+  artifact for the separately authorized publisher.
+- Repository operations document the temporary solo-operator exception: zero
+  required pull-request approvals and permitted production self-review only
+  while `zephod111r` is the sole visible qualified maintainer, without weakening
+  admin enforcement, exact CI, environment review, or no-bypass controls.
+- Monthly dependency repair now reinstalls and validates the repaired graph and
+  opens its pull request with the release-preparation GitHub App.
+
+### Fixed
+
+- Runtime-array buffer bindings now use the WebGPU one-element minimum instead
+  of the fixed codec prefix.
+- Model-facing buffer roots without named WGSL records are rejected, preventing
+  scalar/array element-type collisions in `modelAbiHash`.
+- Qualification reruns use attempt-scoped artifacts and atomically select one
+  typed cell outcome, including setup-failure diagnostics.
+- Qualification-bundle admission now independently re-reflects exact final
+  WGSL and regenerates model, interface, and shader ABI hashes before accepting
+  caller manifests, including otherwise self-consistent rehashed claims.
+
+### Security
+
+- Qualification archives are data-only and physical runners execute only the
+  pinned trusted harness; candidate code is not executable on runner machines.
+- Physical automation code must be a runner-owned, self-contained adapter
+  preload bound to its fixed OS root, exact SHA-256, runner, cells, and harness.
+- npm delivery now packs one bounded immutable tarball into an exact
+  digest-bound tarball/SBOM/transport-manifest closure. The privileged publisher
+  runs no checked-out package code, independently verifies that closure, binds
+  duplicate-release recovery to authoritative live registry state, preflights
+  the complete tag/release/one-SBOM asset closure before mutation, derives
+  prerelease state from the transported version, verifies exact-workflow SLSA
+  provenance and registry signatures, and fails closed on drift or ambiguous
+  partial releases.
+- Codecov uses OIDC and release/maintenance actions are pinned to reviewed
+  Node-24-compatible revisions.
+
+[Unreleased]: https://github.com/Plasius-LTD/gpu-shader/commits/main

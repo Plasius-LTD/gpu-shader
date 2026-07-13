@@ -1,0 +1,53 @@
+name: Bug report
+description: Report a reproducible package defect for maintainer triage.
+title: "[REPORT] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security issues here. Email security@plasius.co.uk.
+        Maintainers will link accepted implementation work to a parent Feature/Story before coding.
+  - type: input
+    id: version
+    attributes:
+      label: Package version or commit
+      placeholder: 0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic data only; do not attach credentials, PII, or executable archives.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Node/browser, OS, adapter/backend/driver, WebGPU features and limits where relevant.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Sanitized diagnostics, manifest identities, and compile-unit/cell IDs.
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety confirmation
+      options:
+        - label: This report contains no secrets or real personal information.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true

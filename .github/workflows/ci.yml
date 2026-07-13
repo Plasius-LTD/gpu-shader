@@ -1,0 +1,224 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  actions: read
+  contents: read
+
+env:
+  FALLBACK_RUNNER_LABEL: ubuntu-latest
+  SELF_HOSTED_RUNNER_LABELS: '["self-hosted","Linux","X64"]'
+
+jobs:
+  select-runner:
+    name: Select runner
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      runner_labels: ${{ steps.select.outputs.runner_labels }}
+    steps:
+      - name: Prefer idle self-hosted runner
+        id: select
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        env:
+          RUNNER_SELECTOR_TOKEN_AVAILABLE: ${{ secrets.RUNNER_SELECTOR_TOKEN != '' }}
+        with:
+          github-token: ${{ secrets.RUNNER_SELECTOR_TOKEN || github.token }}
+          script: |
+            const selfHostedLabels = JSON.parse(process.env.SELF_HOSTED_RUNNER_LABELS)
+            const fallbackRunner = process.env.FALLBACK_RUNNER_LABEL
+            let selectedRunnerJson = JSON.stringify(fallbackRunner)
+
+            if (context.eventName === "pull_request") {
+              core.info(`Pull request CI always uses ${fallbackRunner}.`)
+              core.setOutput("runner_labels", selectedRunnerJson)
+              return
+            }
+
+            if (process.env.RUNNER_SELECTOR_TOKEN_AVAILABLE !== "true") {
+              core.info("RUNNER_SELECTOR_TOKEN is not configured; using the hosted fallback runner.")
+              core.setOutput("runner_labels", selectedRunnerJson)
+              return
+            }
+
+            try {
+              const runners = await github.paginate(
+                github.rest.actions.listSelfHostedRunnersForRepo,
+                {
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  per_page: 100,
+                }
+              )
+
+              const hasMatchingIdleRunner = runners.some((runner) => {
+                const labels = new Set((runner.labels || []).map((label) => label.name))
+                return (
+                  runner.status === "online" &&
+                  runner.busy === false &&
+                  selfHostedLabels.every((label) => labels.has(label))
+                )
+              })
+
+              if (hasMatchingIdleRunner) {
+                selectedRunnerJson = JSON.stringify(selfHostedLabels)
+                core.info(`Selected self-hosted runner labels ${selfHostedLabels.join(", ")}.`)
+              } else {
+                core.info(
+                  `No idle self-hosted runner with labels ${selfHostedLabels.join(", ")} was found; falling back to ${fallbackRunner}.`
+                )
+              }
+            } catch (error) {
+              core.warning(
+                `Could not inspect self-hosted runners; falling back to ${fallbackRunner}. ${error.message}`
+              )
+            }
+
+            core.setOutput("runner_labels", selectedRunnerJson)
+
+  build-test:
+    needs: select-runner
+    runs-on: ${{ fromJSON(needs.select-runner.outputs.runner_labels) }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+
+      - name: Install deps
+        run: npm ci --no-fund --no-audit --legacy-peer-deps
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Security audit (runtime deps)
+        run: npm run audit:npm
+
+      - name: Dependency graph integrity
+        run: npm run audit:deps
+
+      - name: Build
+        run: npm run build --if-present
+
+      - name: Validate stable WebGPU matrix policy
+        run: npm run shader:matrix
+
+      - name: Test with coverage
+        run: |
+          set -euo pipefail
+
+          if node -e "const s=(require('./package.json').scripts||{})['test:coverage']||''; process.exit(s.includes('vitest') ? 0 : 1)"; then
+            npm run test:coverage -- --coverage.reporter=lcov --coverage.reporter=text-summary
+          elif node -e "const s=(require('./package.json').scripts||{})['test:coverage']||''; process.exit(s ? 0 : 1)"; then
+            npm run test:coverage
+          elif node -e "const s=(require('./package.json').scripts||{}).test||''; process.exit(s.includes('vitest') ? 0 : 1)"; then
+            npm run test -- --coverage --coverage.reporter=lcov --coverage.reporter=text-summary
+          else
+            npm run test -- --coverage
+          fi
+
+      - name: Locate coverage report
+        run: |
+          set -euo pipefail
+          LCOV_FILE="$(find coverage -type f -name lcov.info | head -n 1 || true)"
+          if [ -z "$LCOV_FILE" ]; then
+            echo "No lcov.info found under coverage/."
+            exit 1
+          fi
+          echo "Using coverage report: $LCOV_FILE"
+          echo "LCOV_FILE=$LCOV_FILE" >> "$GITHUB_ENV"
+
+      - name: Enforce line coverage >= 80%
+        run: |
+          set -euo pipefail
+          if [ -z "${LCOV_FILE:-}" ] || [ ! -f "$LCOV_FILE" ]; then
+            echo "Missing coverage report: ${LCOV_FILE:-unset}"
+            exit 1
+          fi
+
+          read -r LF LH <<EOF
+          $(awk -F: '/^LF:/{lf+=$2} /^LH:/{lh+=$2} END{printf "%d %d\n", lf+0, lh+0}' "$LCOV_FILE")
+          EOF
+
+          if [ "$LF" -le 0 ]; then
+            echo "Invalid coverage totals (LF=$LF, LH=$LH)"
+            exit 1
+          fi
+
+          PCT=$(awk -v lh="$LH" -v lf="$LF" 'BEGIN{printf "%.2f", (lh/lf)*100}')
+          echo "Line coverage: ${PCT}% (${LH}/${LF})"
+
+          awk -v pct="$PCT" 'BEGIN{exit(pct >= 80 ? 0 : 1)}' || {
+            echo "Coverage gate failed: ${PCT}% < 80%"
+            exit 1
+          }
+
+      - name: Require every changed TypeScript source file in LCOV
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BASE_SHA:-}" ] || printf '%s' "${BASE_SHA}" | grep -Eq '^0+$' || ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            mapfile -t CHANGED_SOURCES < <(git ls-files 'src/*.ts' 'src/**/*.ts' | awk '!/\.d\.(c|m)?ts$/')
+          else
+            mapfile -t CHANGED_SOURCES < <(git diff --name-only --diff-filter=ACMR "${BASE_SHA}" "${GITHUB_SHA}" -- 'src/*.ts' 'src/**/*.ts' | awk '!/\.d\.(c|m)?ts$/')
+          fi
+
+          for source in "${CHANGED_SOURCES[@]}"; do
+            if ! awk -F: -v source="${source}" '$1 == "SF" { candidate=$2; gsub(/\\/, "/", candidate); start=length(candidate)-length(source)+1; if (candidate == source || (start > 1 && substr(candidate, start) == source && substr(candidate, start-1, 1) == "/")) found=1 } END { exit found ? 0 : 1 }' "${LCOV_FILE}"; then
+              echo "Changed source file is missing from LCOV: ${source}"
+              exit 1
+            fi
+          done
+
+      - name: Verify public package contents and exports
+        run: npm run pack:check
+
+      - name: Upload attempt-scoped LCOV artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: coverage-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ env.LCOV_FILE }}
+          if-no-files-found: error
+          retention-days: 1
+
+  codecov:
+    name: Upload coverage to Codecov
+    needs: build-test
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Download exact attempt-scoped LCOV artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: coverage-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: codecov-coverage
+
+      - name: Upload coverage to Codecov with OIDC
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          use_oidc: true
+          files: codecov-coverage/lcov.info
+          flags: unittests
+          fail_ci_if_error: true
+          slug: ${{ github.repository }}
