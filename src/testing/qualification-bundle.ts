@@ -6,6 +6,8 @@ import {
   type ShaderQualificationFixtureManifest,
   type ShaderResult,
 } from "../contracts.js";
+import { canonicalizeGpuContract } from "../canonical-json.js";
+import { assertImmutableAssetVersion } from "../asset-version.js";
 import { asSha256Hex } from "../hash.js";
 import { validateCompileUnitInventory } from "./inventory.js";
 
@@ -78,6 +80,20 @@ function object(value: unknown, path: string): UnknownRecord {
   return value as UnknownRecord;
 }
 
+function detachedJson(value: unknown, label: string): unknown {
+  try {
+    return JSON.parse(canonicalizeGpuContract(value)) as unknown;
+  } catch (cause) {
+    throw new TypeError(`${label} must contain detached JSON contract data.`, { cause });
+  }
+}
+
+function freezeJson<T>(value: T): T {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value as Record<string, unknown>)) freezeJson(child);
+  return Object.freeze(value);
+}
+
 function exact(value: UnknownRecord, keys: readonly string[], path: string): void {
   const expected = new Set(keys);
   if (!Object.keys(value).every((key) => expected.has(key)) || !keys.every((key) => key in value)) throw new TypeError(`${path} has unknown or missing fields.`);
@@ -86,6 +102,17 @@ function exact(value: UnknownRecord, keys: readonly string[], path: string): voi
 function token(value: unknown, path: string): string {
   if (typeof value !== "string" || !TOKEN.test(value) || value.includes("..")) throw new TypeError(`${path} must be a safe token.`);
   return value;
+}
+
+function immutableVersion(value: unknown, path: string): string {
+  try {
+    return assertImmutableAssetVersion(value);
+  } catch (cause) {
+    throw new TypeError(
+      `${path} must be an immutable asset version: exact token required; mutable aliases, ranges, wildcards, and URLs are not allowed.`,
+      { cause },
+    );
+  }
 }
 
 function path(value: unknown, label: string, extensions: readonly string[]): string {
@@ -248,7 +275,7 @@ export function validateQualificationFixture(
   unit?: ShaderCompileUnitManifest,
 ): ShaderResult<ShaderQualificationFixtureManifest> {
   try {
-    const fixture = object(value, "fixture"); exact(fixture, ["contractVersion", "fixtureId", "resources", "bindGroups", "commands", "layoutProbes", "readbacks", "bounds"], "fixture");
+    const fixture = object(detachedJson(value, "fixture"), "fixture"); exact(fixture, ["contractVersion", "fixtureId", "resources", "bindGroups", "commands", "layoutProbes", "readbacks", "bounds"], "fixture");
     if (fixture.contractVersion !== SHADER_QUALIFICATION_FIXTURE_VERSION) throw new TypeError("Unsupported qualification fixture version.");
     token(fixture.fixtureId, "fixture.fixtureId");
     const bounds = object(fixture.bounds, "fixture.bounds"); exact(bounds, ["maxBufferBytes", "maxTextureTexels", "maxCommands", "timeoutMs"], "fixture.bounds");
@@ -377,7 +404,7 @@ export function validateQualificationFixture(
       const output = object(probe.output, `${label}.output`); exact(output, ["readbackIndex", "recordName", "expectedValue"], `${label}.output`); integer(output.readbackIndex, `${label}.output.readbackIndex`, 0, parsedReadbacks.length - 1); token(output.recordName, `${label}.output.recordName`); jsonValue(output.expectedValue, `${label}.output.expectedValue`);
     }
     unique(probeIds, "fixture.layoutProbes probe IDs"); unique(probeSources, "fixture.layoutProbes model sources");
-    return { ok: true, value: fixture as unknown as ShaderQualificationFixtureManifest };
+    return { ok: true, value: freezeJson(fixture as unknown as ShaderQualificationFixtureManifest) };
   } catch (cause) {
     return { ok: false, diagnostics: [{ code: "invalid-contract", severity: "error", message: cause instanceof Error ? cause.message : "Invalid qualification fixture." }] };
   }
@@ -386,11 +413,11 @@ export function validateQualificationFixture(
 /** Validates the non-self-referential, data-only candidate bundle envelope. */
 export function validateQualificationBundleManifest(value: unknown): ShaderResult<ShaderQualificationBundleManifest> {
   try {
-    const bundle = object(value, "qualification"); exact(bundle, ["contractVersion", "inventory", "subject", "shaderManifestCorePath", "gpuInterfaceManifest", "modelCompatibilityFixtures", "modules", "fixtures"], "qualification");
+    const bundle = object(detachedJson(value, "qualification"), "qualification"); exact(bundle, ["contractVersion", "inventory", "subject", "shaderManifestCorePath", "gpuInterfaceManifest", "modelCompatibilityFixtures", "modules", "fixtures"], "qualification");
     if (bundle.contractVersion !== SHADER_QUALIFICATION_BUNDLE_VERSION) throw new TypeError("Unsupported qualification bundle version.");
     const inventory = validateCompileUnitInventory(bundle.inventory); if (!inventory.ok) throw new TypeError(inventory.diagnostics.map((item) => item.message).join("; "));
     const subject = object(bundle.subject, "qualification.subject"); exact(subject, ["shaderManifestCore", "compileUnitInventorySha256", "shaderAbiHash", "interfaceManifestSha256", "modelAbiHashes", "modules", "requiredCompileUnitIds", "requiredCellIds"], "qualification.subject");
-    const candidate = object(subject.shaderManifestCore, "qualification.subject.shaderManifestCore"); exact(candidate, ["shaderId", "version", "sha256"], "qualification.subject.shaderManifestCore"); token(candidate.shaderId, "qualification.subject.shaderManifestCore.shaderId"); token(candidate.version, "qualification.subject.shaderManifestCore.version"); sha(candidate.sha256, "qualification.subject.shaderManifestCore.sha256");
+    const candidate = object(subject.shaderManifestCore, "qualification.subject.shaderManifestCore"); exact(candidate, ["shaderId", "version", "sha256"], "qualification.subject.shaderManifestCore"); token(candidate.shaderId, "qualification.subject.shaderManifestCore.shaderId"); immutableVersion(candidate.version, "qualification.subject.shaderManifestCore.version"); sha(candidate.sha256, "qualification.subject.shaderManifestCore.sha256");
     path(bundle.shaderManifestCorePath, "qualification.shaderManifestCorePath", [".json"]);
     const interfaceManifest = object(bundle.gpuInterfaceManifest, "qualification.gpuInterfaceManifest"); exact(interfaceManifest, ["path", "sha256"], "qualification.gpuInterfaceManifest"); path(interfaceManifest.path, "qualification.gpuInterfaceManifest.path", [".json"]); const interfaceSha = sha(interfaceManifest.sha256, "qualification.gpuInterfaceManifest.sha256"); if (interfaceSha !== subject.interfaceManifestSha256) throw new TypeError("GPU interface file digest differs from subject.");
     const modelFixtures = boundedArray(bundle.modelCompatibilityFixtures, "qualification.modelCompatibilityFixtures").map((item, index) => { const label = `qualification.modelCompatibilityFixtures[${index}]`; const fixture = object(item, label); exact(fixture, ["fixtureId", "path", "sha256"], label); return { fixtureId: token(fixture.fixtureId, `${label}.fixtureId`), path: path(fixture.path, `${label}.path`, [".json"]), sha256: sha(fixture.sha256, `${label}.sha256`) }; }); if (modelFixtures.length === 0) throw new TypeError("Qualification requires at least one model compatibility fixture."); unique(modelFixtures.map((item) => item.fixtureId), "qualification.modelCompatibilityFixtures"); unique(modelFixtures.map((item) => item.path), "qualification.modelCompatibilityFixtures paths");
@@ -400,7 +427,7 @@ export function validateQualificationBundleManifest(value: unknown): ShaderResul
     const fixtures = boundedArray(bundle.fixtures, "qualification.fixtures").map((item, index) => { const label = `qualification.fixtures[${index}]`; const fixture = object(item, label); exact(fixture, ["fixtureId", "path", "sha256", "kind"], label); if (fixture.kind !== "qualification-fixture") throw new TypeError(`${label}.kind is invalid.`); return { fixtureId: token(fixture.fixtureId, `${label}.fixtureId`), path: path(fixture.path, `${label}.path`, [".json"]), sha256: sha(fixture.sha256, `${label}.sha256`) }; }); if (fixtures.length === 0) throw new TypeError("Qualification requires at least one semantic fixture."); unique(fixtures.map((item) => item.fixtureId), "qualification.fixtures"); unique(fixtures.map((item) => item.path), "qualification.fixtures paths");
     const fixtureIdentities = new Set(fixtures.map((item) => `${item.fixtureId}:${item.path}:${item.sha256}`)); for (const unit of inventory.value.compileUnits) { const ref = unit.qualificationFixture; if (!fixtureIdentities.has(`${ref.fixtureId}:${ref.path}:${ref.sha256}`)) throw new TypeError(`Compile unit ${unit.compileUnitId} fixture is absent or stale.`); }
     const unitIds = orderedUniqueTokens(subject.requiredCompileUnitIds, "qualification.subject.requiredCompileUnitIds"); const expectedUnits = [...inventory.value.compileUnits.map((unit) => unit.compileUnitId)].sort(); if (unitIds.join("\n") !== expectedUnits.join("\n")) throw new TypeError("Subject compile-unit IDs differ from inventory."); orderedUniqueTokens(subject.requiredCellIds, "qualification.subject.requiredCellIds");
-    return { ok: true, value: bundle as unknown as ShaderQualificationBundleManifest };
+    return { ok: true, value: freezeJson(bundle as unknown as ShaderQualificationBundleManifest) };
   } catch (cause) {
     return { ok: false, diagnostics: [{ code: "invalid-contract", severity: "error", message: cause instanceof Error ? cause.message : "Invalid qualification bundle." }] };
   }

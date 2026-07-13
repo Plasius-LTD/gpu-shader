@@ -349,9 +349,9 @@ describe("style preparation descriptor and cleanup edge coverage", () => {
   it("maps every binding resource descriptor and shader-stage visibility mask", async () => {
     const assets = await shaderAssets();
     const resources: readonly GpuBindingResourceLayout[] = [
-      { kind: "buffer", addressSpace: "uniform", access: "read", recordName: "Data", minimumBindingSize: 4 },
-      { kind: "buffer", addressSpace: "storage", access: "read", recordName: "Data", minimumBindingSize: 4 },
-      { kind: "buffer", addressSpace: "storage", access: "read_write", recordName: "Data", minimumBindingSize: 4 },
+      { kind: "buffer", addressSpace: "uniform", access: "read", recordName: "ModelData", minimumBindingSize: 112 },
+      { kind: "buffer", addressSpace: "storage", access: "read", recordName: "ModelData", minimumBindingSize: 112 },
+      { kind: "buffer", addressSpace: "storage", access: "read_write", recordName: "ModelData", minimumBindingSize: 112 },
       { kind: "sampler", samplerType: "comparison" },
       { kind: "texture", sampleType: "float", viewDimension: "2d", multisampled: false },
       { kind: "storage-texture", access: "write-only", format: "rgba8unorm", viewDimension: "2d" },
@@ -361,34 +361,53 @@ describe("style preparation descriptor and cleanup edge coverage", () => {
       const loaded = mutableLoadedStyleProfile(await loadedStyleProfile());
       const shader = loaded.shaders.get("material")!;
       const pipeline = shader.manifest.pipelines[0]!;
-      (pipeline.layout.bindGroups[0]!.entries[0] as Mutable<typeof pipeline.layout.bindGroups[number]["entries"][number]>).resource = resource;
-      (shader.gpuInterface.bindings[0] as Mutable<typeof shader.gpuInterface.bindings[number]>).resource = resource;
-      const extraLimits = resource.kind === "sampler"
-        ? [{ name: "maxSamplersPerShaderStage", comparator: "at-least" as const, value: 1 }]
-        : resource.kind === "texture"
-          ? [{ name: "maxSampledTexturesPerShaderStage", comparator: "at-least" as const, value: 1 }]
-          : resource.kind === "storage-texture"
-            ? [{ name: "maxStorageTexturesPerShaderStage", comparator: "at-least" as const, value: 1 }]
-            : resource.kind === "external-texture"
-              ? [
-                  { name: "maxSampledTexturesPerShaderStage", comparator: "at-least" as const, value: 4 },
-                  { name: "maxSamplersPerShaderStage", comparator: "at-least" as const, value: 1 },
-                  { name: "maxUniformBuffersPerShaderStage", comparator: "at-least" as const, value: 1 },
-                ]
-              : resource.addressSpace === "uniform"
-                ? [
-                    { name: "maxUniformBuffersPerShaderStage", comparator: "at-least" as const, value: 1 },
-                    { name: "maxUniformBufferBindingSize", comparator: "at-least" as const, value: 4 },
-                  ]
-                : [];
-      (shader.manifest.requirements as Mutable<typeof shader.manifest.requirements>).limits = [
-        ...shader.manifest.requirements.limits,
-        ...extraLimits.filter((extra) => !shader.manifest.requirements.limits.some((limit) => limit.name === extra.name)),
+      const group = pipeline.layout.bindGroups[0]! as Mutable<typeof pipeline.layout.bindGroups[number]>;
+      group.entries = [...group.entries, { group: 0, binding: 1, resource, visibility: ["compute"] }];
+      const reflectedBinding = clone(shader.gpuInterface.bindings[0]!) as Mutable<typeof shader.gpuInterface.bindings[number]>;
+      reflectedBinding.variableName = `coverage_${resource.kind}`;
+      reflectedBinding.binding = 1;
+      reflectedBinding.resource = resource;
+      (shader.gpuInterface as Mutable<typeof shader.gpuInterface>).bindings = [
+        ...shader.gpuInterface.bindings,
+        reflectedBinding,
       ];
+      const reflectedEntry = shader.gpuInterface.entryPoints[0]! as Mutable<typeof shader.gpuInterface.entryPoints[number]>;
+      reflectedEntry.bindingKeys = [...reflectedEntry.bindingKeys, "compute:0:1"];
+      const requiredLimits = new Map(shader.manifest.requirements.limits.map((limit) => [limit.name, limit]));
+      const requireLimit = (name: string, value: number): void => {
+        const current = requiredLimits.get(name);
+        if (!current || current.comparator !== "at-least" || current.value < value) {
+          requiredLimits.set(name, { name, comparator: "at-least", value });
+        }
+      };
+      requireLimit("maxBindingsPerBindGroup", 2);
+      if (resource.kind === "buffer" && resource.addressSpace === "uniform") {
+        requireLimit("maxUniformBuffersPerShaderStage", 1);
+        requireLimit("maxUniformBufferBindingSize", 112);
+      } else if (resource.kind === "buffer") {
+        requireLimit("maxStorageBuffersPerShaderStage", 2);
+        requireLimit("maxStorageBufferBindingSize", 112);
+      } else if (resource.kind === "sampler") requireLimit("maxSamplersPerShaderStage", 1);
+      else if (resource.kind === "texture") requireLimit("maxSampledTexturesPerShaderStage", 1);
+      else if (resource.kind === "storage-texture") requireLimit("maxStorageTexturesPerShaderStage", 1);
+      else {
+        requireLimit("maxSampledTexturesPerShaderStage", 4);
+        requireLimit("maxSamplersPerShaderStage", 1);
+        requireLimit("maxUniformBuffersPerShaderStage", 1);
+      }
+      (shader.manifest.requirements as Mutable<typeof shader.manifest.requirements>).limits = [...requiredLimits.values()];
       const gpu = gpuDevice();
       const result = await prepareStyleProfile({ loaded: trustLoadedShaderStyleProfile(loaded), model: assets.model, capabilities: capabilities(), device: gpu.device });
       expect(result.ok, resource.kind).toBe(true);
-      expect(gpu.createBindGroupLayout).toHaveBeenCalledWith({ entries: [expect.objectContaining({ visibility: 4 })] });
+      const descriptorKey = resource.kind === "buffer" ? "buffer"
+        : resource.kind === "sampler" ? "sampler"
+          : resource.kind === "texture" ? "texture"
+            : resource.kind === "storage-texture" ? "storageTexture" : "externalTexture";
+      expect(gpu.createBindGroupLayout).toHaveBeenCalledWith({
+        entries: expect.arrayContaining([
+          expect.objectContaining({ visibility: 4, [descriptorKey]: expect.any(Object) }),
+        ]),
+      });
     }
   });
 
@@ -471,19 +490,19 @@ describe("style preparation descriptor and cleanup edge coverage", () => {
     expect(createComputePipeline).toHaveBeenCalledOnce();
   });
 
-  it("rejects missing role/pipeline and an implementation that returns no pipeline", async () => {
+  it("rejects invalid role/pipeline contracts and an implementation that returns no pipeline", async () => {
     const assets = await shaderAssets();
     const roleMissing = mutableLoadedStyleProfile(await loadedStyleProfile());
     (roleMissing.shaders.get("material")!.manifest as Mutable<ShaderVersionManifest>).renderRoles = [];
     const first = await prepareStyleProfile({ loaded: trustLoadedShaderStyleProfile(roleMissing), model: assets.model, capabilities: capabilities(), device: gpuDevice().device });
     expect(first.ok).toBe(false);
-    if (!first.ok) expect(first.diagnostics[0]?.message).toMatch(/role material disappeared/u);
+    if (!first.ok) expect(first.diagnostics[0]?.message).toMatch(/renderRoles must not be empty/u);
 
     const pipelineMissing = mutableLoadedStyleProfile(await loadedStyleProfile());
     (pipelineMissing.shaders.get("material")!.manifest.renderRoles[0] as Mutable<ShaderVersionManifest["renderRoles"][number]>).pipelineIds = ["absent"];
     const second = await prepareStyleProfile({ loaded: trustLoadedShaderStyleProfile(pipelineMissing), model: assets.model, capabilities: capabilities(), device: gpuDevice().device });
     expect(second.ok).toBe(false);
-    if (!second.ok) expect(second.diagnostics[0]?.message).toMatch(/Pipeline absent is missing/u);
+    if (!second.ok) expect(second.diagnostics[0]?.message).toMatch(/references missing pipeline absent/u);
 
     const noPipeline = gpuDevice({ createComputePipelineAsync: undefined, createComputePipeline: () => undefined });
     const third = await prepareStyleProfile({ loaded: await loadedStyleProfile(), model: assets.model, capabilities: capabilities(), device: noPipeline.device });

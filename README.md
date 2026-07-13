@@ -44,8 +44,8 @@ The root export must remain browser-safe. Reflection and qualification tooling
 are loaded through subpaths so browser bundles do not eagerly include Node.js
 or browser-automation dependencies.
 
-The primary browser-safe APIs are `createGpuRecordCodec`,
-`computeGpuAbiHash`, `validateModelShaderCompatibility`,
+The primary browser-safe APIs are `assertImmutableAssetVersion`,
+`createGpuRecordCodec`, `computeGpuAbiHash`, `validateModelShaderCompatibility`,
 `loadShaderStyleProfile`, `prepareStyleProfile`,
 `createShaderStyleController`, and `activateStyleProfile`, together with the
 strict manifest parsers and versioned contracts. The build APIs
@@ -243,6 +243,16 @@ does not replace the model-facing hash.
 Style profiles map roles such as `material`, `lighting`, `outline`, `shadow`,
 and `post-processing` to exact immutable shader versions.
 
+Every model, GPU-interface, shader, and profile version carried by a manifest
+or immutable reference is checked with `assertImmutableAssetVersion`.
+Reference versions are rejected before their corresponding catalog resolver
+runs; loaded manifest versions are rejected before any child asset resolves.
+Exact tokens such as `1`, `v1`, `1.2.3`, and
+`2026.07.13-a1` are valid. Mutable aliases (`latest`, `stable`, `default`,
+`main`, and similar), ranges, wildcards, URLs, and path syntax are rejected.
+Catalog channels may use friendly names, but a resolved reference must contain
+the exact immutable version.
+
 ```ts
 import {
   activateStyleProfile,
@@ -438,7 +448,9 @@ standing line-coverage exception, replaced by 100% compile-unit inventory and
 - [Documentation index](docs/index.md)
 - [Framework design](docs/design/wgsl-shader-compatibility-and-style-framework.md)
 - [ADR: final WGSL is the source of truth](docs/adrs/adr-0001-final-assembled-wgsl-is-the-interface-source-of-truth.md)
+- [ADR: immutable GPU asset versions before catalog access](docs/adrs/adr-0003-immutable-gpu-asset-versions-before-catalog-access.md)
 - [TDR: qualification evidence and trusted runners](docs/tdrs/tdr-0001-qualification-evidence-and-trusted-runners.md)
+- [TDR: exact immutable GPU asset version grammar](docs/tdrs/tdr-0002-exact-immutable-gpu-asset-version-grammar.md)
 - [Physical fleet readiness](docs/operations/physical-fleet-readiness.md)
 - [Security policy](SECURITY.md)
 - [Contributing](CONTRIBUTING.md)

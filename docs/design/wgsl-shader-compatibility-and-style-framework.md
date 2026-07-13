@@ -259,19 +259,22 @@ copy may be written into a final `ShaderValidationEvidenceRef`.
 ## Runtime flow
 
 1. Resolve a model and optional selected style through promoted catalog refs.
-2. Load profile, shader, interface and module bytes through a
+2. Require every resolved model, interface, shader, and profile reference to
+   carry an exact immutable version; reject aliases, ranges, wildcards, URLs,
+   and path syntax before catalog access.
+3. Load profile, shader, interface and module bytes through a
    `PromotedShaderCatalogResolver`; direct arbitrary URLs are not accepted.
-3. Parse strict manifests and reject unknown, malformed or inconsistent fields.
-4. Verify every manifest and module digest before decoding WGSL.
-5. Re-derive requirements from the complete exact WGSL module set and pipeline
+4. Parse strict manifests and reject unknown, malformed or inconsistent fields.
+5. Verify every manifest and module digest before decoding WGSL.
+6. Re-derive requirements from the complete exact WGSL module set and pipeline
    descriptors.
-6. Require exact interface identity, `modelAbiHash`, model semantics, formats,
+7. Require exact interface identity, `modelAbiHash`, model semantics, formats,
    features and limits.
-7. Compile with `createShaderModule` and inspect `getCompilationInfo()`.
-8. Create explicit bind-group layouts, pipeline layouts and pipelines under a
+8. Compile with `createShaderModule` and inspect `getCompilationInfo()`.
+9. Create explicit bind-group layouts, pipeline layouts and pipelines under a
    WebGPU validation error scope.
-9. Keep prepared resources separate from the active profile.
-10. Atomically activate at a frame boundary; dispose the previous profile only
+10. Keep prepared resources separate from the active profile.
+11. Atomically activate at a frame boundary; dispose the previous profile only
    after the switch succeeds.
 
 Typed diagnostics describe invalid contracts, digests, ABI mismatch, missing

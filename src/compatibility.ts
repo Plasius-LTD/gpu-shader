@@ -8,6 +8,14 @@ import type {
   ShaderStyleProfileManifest,
   ShaderVersionManifestCore,
 } from "./contracts.js";
+import { canonicalizeGpuContract } from "./canonical-json.js";
+import {
+  parseGpuInterfaceManifest,
+  parseModelGpuCompatibilityDescriptor,
+  parseShaderStyleProfileManifest,
+  parseShaderVersionManifest,
+  parseShaderVersionManifestCore,
+} from "./manifest-validation.js";
 import { validateShaderInterfaceRequirements } from "./requirements-validation.js";
 
 function error(
@@ -15,7 +23,14 @@ function error(
   message: string,
   path?: string,
 ): ShaderDiagnostic {
-  return { code, severity: "error", message, ...(path ? { path } : {}) };
+  const bounded = [...message]
+    .map((character) => {
+      const codePoint = character.codePointAt(0) as number;
+      return codePoint <= 0x1f || codePoint === 0x7f ? " " : character;
+    })
+    .slice(0, 512)
+    .join("");
+  return { code, severity: "error", message: bounded, ...(path ? { path } : {}) };
 }
 
 function interfaceMatches(
@@ -27,6 +42,17 @@ function interfaceMatches(
     && item.manifestSha256 === model.gpuInterface.manifestSha256
     && item.interfaceAbiHash === model.gpuInterface.interfaceAbiHash
     && item.modelAbiHash === model.modelAbiHash;
+}
+
+function detachedContract(value: unknown): unknown {
+  return JSON.parse(canonicalizeGpuContract(value)) as unknown;
+}
+
+function hasValidationEvidence(value: unknown): boolean {
+  return typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+    && (Object.hasOwn(value, "validationEvidence") || Object.hasOwn(value, "additionalValidationEvidence"));
 }
 
 function validateRequirements(
@@ -86,7 +112,36 @@ export function validateModelShaderCompatibility(input: {
   readonly capabilities?: GpuCapabilitySnapshot;
 }): ShaderResult<ModelShaderCompatibility> {
   const diagnostics: ShaderDiagnostic[] = [];
-  const { model, shader, gpuInterface, profile, capabilities } = input;
+  let model: ModelGpuCompatibilityDescriptor;
+  let shader: ShaderVersionManifestCore;
+  let gpuInterface: GpuInterfaceManifest;
+  let profile: ShaderStyleProfileManifest | undefined;
+  let capabilities: GpuCapabilitySnapshot | undefined;
+  try {
+    const modelSnapshot = detachedContract(input.model);
+    const shaderSnapshot = detachedContract(input.shader);
+    const gpuInterfaceSnapshot = detachedContract(input.gpuInterface);
+    const profileValue = input.profile;
+    const profileSnapshot = profileValue === undefined ? undefined : detachedContract(profileValue);
+
+    model = parseModelGpuCompatibilityDescriptor(modelSnapshot);
+    shader = hasValidationEvidence(shaderSnapshot)
+      ? parseShaderVersionManifest(shaderSnapshot)
+      : parseShaderVersionManifestCore(shaderSnapshot);
+    gpuInterface = parseGpuInterfaceManifest(gpuInterfaceSnapshot);
+    profile = profileSnapshot === undefined
+      ? undefined
+      : parseShaderStyleProfileManifest(profileSnapshot);
+    capabilities = input.capabilities;
+  } catch (cause) {
+    return {
+      ok: false,
+      diagnostics: [error(
+        "invalid-contract",
+        cause instanceof Error ? cause.message : "GPU compatibility contract snapshot failed.",
+      )],
+    };
+  }
   try {
     validateShaderInterfaceRequirements({ manifest: shader, gpuInterface });
   } catch (cause) {
@@ -116,7 +171,15 @@ export function validateModelShaderCompatibility(input: {
       }
     }
   }
-  validateRequirements(shader, gpuInterface, model, capabilities, diagnostics);
+  try {
+    validateRequirements(shader, gpuInterface, model, capabilities, diagnostics);
+  } catch (cause) {
+    diagnostics.push(error(
+      "invalid-contract",
+      cause instanceof Error ? cause.message : "GPU capability snapshot validation failed.",
+      "capabilities",
+    ));
+  }
   if (diagnostics.length > 0) return { ok: false, diagnostics };
   return {
     ok: true,

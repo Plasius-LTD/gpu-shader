@@ -9,7 +9,6 @@ import type {
   PreparedShaderStyleProfile,
   PromotedShaderCatalogResolver,
   ShaderStyleProfileRef,
-  ShaderVersionManifest,
 } from "../src/contracts.js";
 import { computeSha256 } from "../src/hash.js";
 import { loadShaderStyleProfile } from "../src/runtime/catalog-loader.js";
@@ -126,17 +125,49 @@ describe("model/shader compatibility", () => {
     }
   });
 
+  it("returns bounded invalid-contract diagnostics for hostile contract and capability accessors", async () => {
+    const assets = await shaderAssets();
+    const capabilitiesWithGetter = {} as ReturnType<typeof capabilities>;
+    Object.defineProperties(capabilitiesWithGetter, {
+      features: { enumerable: true, get: () => { throw new Error("capabilities getter exploded"); } },
+      limits: { enumerable: true, value: {} },
+      formats: { enumerable: true, value: [] },
+    });
+    const capabilityResult = validateModelShaderCompatibility({
+      model: assets.model,
+      shader: assets.shaderManifest,
+      gpuInterface: assets.gpuInterface,
+      capabilities: capabilitiesWithGetter,
+    });
+    expect(capabilityResult.ok).toBe(false);
+    if (!capabilityResult.ok) {
+      expect(capabilityResult.diagnostics).toContainEqual(expect.objectContaining({
+        code: "invalid-contract",
+        path: "capabilities",
+      }));
+    }
+
+    const oversized = clone(assets.model) as unknown as Record<string, unknown>;
+    oversized["x".repeat(20_000)] = true;
+    const contractResult = validateModelShaderCompatibility({
+      model: oversized as unknown as typeof assets.model,
+      shader: assets.shaderManifest,
+      gpuInterface: assets.gpuInterface,
+    });
+    expect(contractResult.ok).toBe(false);
+    if (!contractResult.ok) expect(contractResult.diagnostics[0]!.message.length).toBeLessThanOrEqual(512);
+  });
+
   it("rejects disagreement among model ref, shader ref and declared compatible interfaces", async () => {
     const assets = await shaderAssets();
     const model = clone(assets.model);
-    (model.gpuInterface as Mutable<typeof model.gpuInterface>).modelAbiHash = ONE_SHA;
     const shader = clone(assets.shaderManifest);
     (shader.gpuInterface as Mutable<typeof shader.gpuInterface>).modelAbiHash = TWO_SHA;
-    (shader as Mutable<ShaderVersionManifest>).compatibleModelInterfaces = [];
+    (shader.compatibleModelInterfaces[0] as Mutable<typeof shader.compatibleModelInterfaces[number]>).modelAbiHash = TWO_SHA;
     const result = validateModelShaderCompatibility({ model, shader, gpuInterface: assets.gpuInterface });
     expect(result.ok).toBe(false);
     if (!result.ok) {
-      expect(result.diagnostics.filter((diagnostic) => diagnostic.code === "model-abi-mismatch")).toHaveLength(2);
+      expect(result.diagnostics.filter((diagnostic) => diagnostic.code === "model-abi-mismatch")).toHaveLength(1);
       expect(result.diagnostics).toContainEqual(expect.objectContaining({ code: "incompatible-model-interface" }));
     }
   });
@@ -376,6 +407,24 @@ describe("style profile preparation", () => {
     });
     expect(result.ok).toBe(false);
     if (!result.ok) expect(result.diagnostics).toContainEqual(expect.objectContaining({ code: "missing-feature" }));
+    expect(gpu.createShaderModule).not.toHaveBeenCalled();
+  });
+
+  it("rejects mutable model versions before creating GPU resources", async () => {
+    const assets = await shaderAssets();
+    const model = clone(assets.model);
+    (model as Mutable<typeof model>).version = "default";
+    const gpu = mockDevice();
+
+    const result = await prepareStyleProfile({
+      loaded: await loadedStyleProfile(),
+      model,
+      capabilities: capabilities(),
+      device: gpu.device,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.diagnostics).toContainEqual(expect.objectContaining({ code: "invalid-contract" }));
     expect(gpu.createShaderModule).not.toHaveBeenCalled();
   });
 

@@ -1,4 +1,5 @@
 export * from "./contracts.js";
+export { assertImmutableAssetVersion } from "./asset-version.js";
 export { canonicalizeGpuContract, parseCanonicalJson } from "./canonical-json.js";
 export { asSha256Hex, computeGpuAbiHash, computeSha256, computeShaderManifestCoreSha256 } from "./hash.js";
 export { createGpuRecordCodec } from "./codec/codec.js";

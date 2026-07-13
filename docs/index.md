@@ -4,11 +4,13 @@
 
 - [WGSL shader compatibility and style framework](design/wgsl-shader-compatibility-and-style-framework.md)
 - [ADR 0001: final assembled WGSL is the interface source of truth](adrs/adr-0001-final-assembled-wgsl-is-the-interface-source-of-truth.md)
+- [ADR 0003: immutable GPU asset versions before catalog access](adrs/adr-0003-immutable-gpu-asset-versions-before-catalog-access.md)
 - [ADR index](adrs/index.md)
 
 ## Technical direction
 
 - [TDR 0001: qualification evidence and trusted runners](tdrs/tdr-0001-qualification-evidence-and-trusted-runners.md)
+- [TDR 0002: exact immutable GPU asset version grammar](tdrs/tdr-0002-exact-immutable-gpu-asset-version-grammar.md)
 - [TDR index](tdrs/index.md)
 
 ## Verification and operations

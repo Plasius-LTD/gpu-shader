@@ -7,6 +7,7 @@ import {
   type ShaderResult,
 } from "../contracts.js";
 import { canonicalizeGpuContract } from "../canonical-json.js";
+import { assertImmutableAssetVersion } from "../asset-version.js";
 import { asSha256Hex } from "../hash.js";
 import { parseSerializableGpuPipelineDescriptors } from "../manifest-validation.js";
 
@@ -22,6 +23,12 @@ function object(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function freezeJson<T>(value: T): T {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value as Record<string, unknown>)) freezeJson(child);
+  return Object.freeze(value);
+}
+
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const expected = new Set(keys);
   return Object.keys(value).every((key) => expected.has(key)) && keys.every((key) => key in value);
@@ -29,6 +36,15 @@ function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boo
 
 function safeToken(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,159}$/u.test(value) && !value.includes("..");
+}
+
+function immutableVersion(value: unknown): boolean {
+  try {
+    assertImmutableAssetVersion(value);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function validSha(value: unknown): boolean {
@@ -49,9 +65,21 @@ export function defineShaderCompileUnit<const T extends ShaderCompileUnitManifes
 export function validateCompileUnitInventory(
   value: unknown,
 ): ShaderResult<ShaderCompileUnitInventory> {
-  const envelope = object(value);
-  const candidate = envelope && "inventory" in envelope
-    ? object((value as Partial<ShaderQualificationBundleManifest>).inventory)
+  let snapshot: unknown;
+  try {
+    snapshot = JSON.parse(canonicalizeGpuContract(value)) as unknown;
+  } catch (cause) {
+    return {
+      ok: false,
+      diagnostics: [issue(
+        "invalid-contract",
+        cause instanceof Error ? cause.message : "Compile-unit inventory must contain detached JSON data.",
+      )],
+    };
+  }
+  const envelope = object(snapshot);
+  const candidate = envelope && Object.hasOwn(envelope, "inventory")
+    ? object((snapshot as Partial<ShaderQualificationBundleManifest>).inventory)
     : envelope;
   const diagnostics: ShaderDiagnostic[] = [];
   if (!candidate || !exactKeys(candidate, ["contractVersion", "fragments", "compileUnits"])) {
@@ -165,7 +193,7 @@ export function validateCompileUnitInventory(
       diagnostics.push(issue("invalid-contract", cause instanceof Error ? cause.message : "Compile-unit pipelines are invalid.", `${path}.pipelines`));
     }
     const interfaceRef = object(unit.interfaceRef);
-    if (!interfaceRef || !exactKeys(interfaceRef, ["interfaceId", "interfaceVersion", "manifestUri", "manifestSha256", "interfaceAbiHash", "modelAbiHash"]) || !safeToken(interfaceRef.interfaceId) || !safeToken(interfaceRef.interfaceVersion) || typeof interfaceRef.manifestUri !== "string" || !interfaceRef.manifestUri.startsWith("https://") || !validSha(interfaceRef.manifestSha256) || !validSha(interfaceRef.interfaceAbiHash) || !validSha(interfaceRef.modelAbiHash)) {
+    if (!interfaceRef || !exactKeys(interfaceRef, ["interfaceId", "interfaceVersion", "manifestUri", "manifestSha256", "interfaceAbiHash", "modelAbiHash"]) || !safeToken(interfaceRef.interfaceId) || !immutableVersion(interfaceRef.interfaceVersion) || typeof interfaceRef.manifestUri !== "string" || !interfaceRef.manifestUri.startsWith("https://") || !validSha(interfaceRef.manifestSha256) || !validSha(interfaceRef.interfaceAbiHash) || !validSha(interfaceRef.modelAbiHash)) {
       diagnostics.push(issue("invalid-contract", "Compile-unit interfaceRef is invalid.", `${path}.interfaceRef`));
     }
     const fixture = object(unit.qualificationFixture);
@@ -178,5 +206,5 @@ export function validateCompileUnitInventory(
   }
   return diagnostics.length > 0
     ? { ok: false, diagnostics }
-    : { ok: true, value: candidate as unknown as ShaderCompileUnitInventory };
+    : { ok: true, value: freezeJson(candidate as unknown as ShaderCompileUnitInventory) };
 }

@@ -11,6 +11,7 @@ import type {
   ShaderVersionRef,
 } from "../contracts.js";
 import { canonicalizeGpuContract } from "../canonical-json.js";
+import { assertImmutableAssetVersion } from "../asset-version.js";
 import { computeGpuAbiHash, computeSha256 } from "../hash.js";
 import {
   parseGpuInterfaceManifest,
@@ -32,6 +33,39 @@ async function verifyBytes(bytes: Uint8Array, expected: string, label: string): 
 
 function copyBytes(bytes: Uint8Array): Uint8Array {
   return new Uint8Array(bytes);
+}
+
+function snapshotProfileRef(ref: ShaderStyleProfileRef): ShaderStyleProfileRef {
+  const profileId = ref.profileId;
+  const version = ref.version;
+  const manifestUri = ref.manifestUri;
+  const manifestSha256 = ref.manifestSha256;
+  return Object.freeze({ profileId, version, manifestUri, manifestSha256 });
+}
+
+function snapshotShaderRef(ref: ShaderVersionRef): ShaderVersionRef {
+  const shaderId = ref.shaderId;
+  const version = ref.version;
+  const manifestUri = ref.manifestUri;
+  const manifestSha256 = ref.manifestSha256;
+  return Object.freeze({ shaderId, version, manifestUri, manifestSha256 });
+}
+
+function snapshotInterfaceRef(ref: GpuInterfaceRef): GpuInterfaceRef {
+  const interfaceId = ref.interfaceId;
+  const interfaceVersion = ref.interfaceVersion;
+  const manifestUri = ref.manifestUri;
+  const manifestSha256 = ref.manifestSha256;
+  const interfaceAbiHash = ref.interfaceAbiHash;
+  const modelAbiHash = ref.modelAbiHash;
+  return Object.freeze({
+    interfaceId,
+    interfaceVersion,
+    manifestUri,
+    manifestSha256,
+    interfaceAbiHash,
+    modelAbiHash,
+  });
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
@@ -108,6 +142,7 @@ async function loadInterface(
   signal?: AbortSignal,
 ) {
   throwIfAborted(signal);
+  assertImmutableAssetVersion(ref.interfaceVersion);
   if (!catalog.isCatalogAssetUri(ref.manifestUri)) throw new TypeError("GPU interface URI is outside the promoted catalog root.");
   const loaded = await catalog.loadInterface(ref, signal);
   const bytes = copyBytes(loaded.bytes);
@@ -138,6 +173,7 @@ async function loadShader(
   signal?: AbortSignal,
 ): Promise<LoadedShaderVersion> {
   throwIfAborted(signal);
+  assertImmutableAssetVersion(ref.version);
   if (!catalog.isCatalogAssetUri(ref.manifestUri)) throw new TypeError("Shader manifest URI is outside the promoted catalog root.");
   const loaded = await catalog.loadShader(ref, signal);
   const bytes = copyBytes(loaded.bytes);
@@ -156,7 +192,8 @@ async function loadShader(
     if (!catalog.isCatalogAssetUri(evidence.uri)) throw new TypeError("Shader validation evidence URI is outside the promoted catalog root.");
     if (!catalog.isCatalogAssetUri(evidence.attestationRef.uri)) throw new TypeError("Shader validation evidence attestation URI is outside the promoted catalog root.");
   }
-  const gpuInterface = await loadInterface(catalog, manifest.gpuInterface, signal);
+  const interfaceRef = snapshotInterfaceRef(manifest.gpuInterface);
+  const gpuInterface = await loadInterface(catalog, interfaceRef, signal);
   const normalizeModules = (values: readonly { readonly moduleId: string; readonly sha256: string }[]) =>
     [...values].sort((left, right) => left.moduleId < right.moduleId ? -1 : left.moduleId > right.moduleId ? 1 : 0)
       .map(({ moduleId, sha256 }) => ({ moduleId, sha256 }));
@@ -195,28 +232,32 @@ export async function loadShaderStyleProfile(input: {
   readonly catalog: PromotedShaderCatalogResolver;
   readonly signal?: AbortSignal;
 }): Promise<ShaderResult<LoadedShaderStyleProfile>> {
+  const signal = input.signal;
   try {
-    throwIfAborted(input.signal);
-    if (!input.catalog.isCatalogAssetUri(input.ref.manifestUri)) throw new TypeError("Style profile URI is outside the promoted catalog root.");
-    const loaded = await input.catalog.loadProfile(input.ref, input.signal);
+    throwIfAborted(signal);
+    const ref = snapshotProfileRef(input.ref);
+    assertImmutableAssetVersion(ref.version);
+    if (!input.catalog.isCatalogAssetUri(ref.manifestUri)) throw new TypeError("Style profile URI is outside the promoted catalog root.");
+    const loaded = await input.catalog.loadProfile(ref, signal);
     const profileBytes = copyBytes(loaded.bytes);
     const promoted = loaded.promoted;
-    throwIfAborted(input.signal);
+    throwIfAborted(signal);
     if (!promoted) {
       return { ok: false, diagnostics: [diagnostic("unpromoted-asset", "Style profile is not promoted.")] };
     }
-    await verifyBytes(profileBytes, input.ref.manifestSha256, "Style profile manifest");
+    await verifyBytes(profileBytes, ref.manifestSha256, "Style profile manifest");
     const manifest = parseShaderStyleProfileManifest(parseJsonBytes(profileBytes, "Style profile manifest"));
-    if (manifest.profileId !== input.ref.profileId || manifest.version !== input.ref.version) {
+    if (manifest.profileId !== ref.profileId || manifest.version !== ref.version) {
       return { ok: false, diagnostics: [diagnostic("invalid-contract", "Style profile identity does not match its exact reference.")] };
     }
     const cache = new Map<string, Promise<LoadedShaderVersion>>();
     const pairs = await mapLimit(manifest.roles, 4, async (binding) => {
-      throwIfAborted(input.signal);
-      const cacheKey = exactShaderRefKey(binding.shader);
+      throwIfAborted(signal);
+      const shaderRef = snapshotShaderRef(binding.shader);
+      const cacheKey = exactShaderRefKey(shaderRef);
       let shader = cache.get(cacheKey);
       if (!shader) {
-        shader = loadShader(input.catalog, binding.shader, input.signal);
+        shader = loadShader(input.catalog, shaderRef, signal);
         cache.set(cacheKey, shader);
       }
       const resolved = await shader;
@@ -242,18 +283,18 @@ export async function loadShaderStyleProfile(input: {
         }
       }
       return [binding.role, resolved] as const;
-    }, input.signal);
+    }, signal);
     assertDistinctEvidenceOwnership(pairs.map(([, shader]) => shader));
     return {
       ok: true,
       value: trustLoadedShaderStyleProfile({
-        ref: input.ref,
+        ref,
         manifest,
         shaders: new Map<ShaderRenderRole, LoadedShaderVersion>(pairs),
       }),
     };
   } catch (cause) {
-    if (input.signal?.aborted) throw cause;
+    if (signal?.aborted) throw cause;
     const code = cause instanceof TypeError && /digest/u.test(cause.message)
       ? "digest-mismatch"
       : "invalid-contract";

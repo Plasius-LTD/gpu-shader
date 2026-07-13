@@ -17,12 +17,23 @@ import {
   type ShaderVersionManifestCore,
 } from "./contracts.js";
 import { canonicalizeGpuContract as canonicalizeForValidation } from "./canonical-json.js";
+import { assertImmutableAssetVersion } from "./asset-version.js";
 import { asSha256Hex } from "./hash.js";
 import { validatePipelineDerivedRequirements } from "./requirements-validation.js";
 
 type UnknownRecord = Record<string, unknown>;
 const stages = ["vertex", "fragment", "compute"] as const;
 const roles = ["material", "lighting", "outline", "shadow", "post-processing"] as const;
+
+function detachedJson(value: unknown, path: string): unknown {
+  try {
+    return JSON.parse(canonicalizeForValidation(value)) as unknown;
+  } catch (cause) {
+    const detail = cause instanceof Error ? cause.message : "Contract snapshot failed.";
+    const boundedDetail = [...detail].slice(0, 512).join("");
+    throw new TypeError(`${path} must contain detached JSON contract data: ${boundedDetail}`, { cause });
+  }
+}
 
 function object(value: unknown, path: string): UnknownRecord {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new TypeError(`${path} must be an object.`);
@@ -46,6 +57,17 @@ function token(value: unknown, path: string): string {
   const result = text(value, path, 160);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u.test(result) || result.includes("..")) throw new TypeError(`${path} must be a safe token.`);
   return result;
+}
+
+function immutableVersion(value: unknown, path: string): string {
+  try {
+    return assertImmutableAssetVersion(value);
+  } catch (cause) {
+    throw new TypeError(
+      `${path} must be an immutable asset version: exact token required; mutable aliases, ranges, wildcards, and URLs are not allowed.`,
+      { cause },
+    );
+  }
 }
 
 function enumeration<T extends string | number>(value: unknown, values: readonly T[], path: string): T {
@@ -320,7 +342,7 @@ function semantic(value: unknown, path: string): UnknownRecord {
 
 function interfaceRef(value: unknown, path: string): UnknownRecord {
   const input = object(value, path); exact(input, ["interfaceId", "interfaceVersion", "manifestUri", "manifestSha256", "interfaceAbiHash", "modelAbiHash"], path);
-  token(input.interfaceId, `${path}.interfaceId`); token(input.interfaceVersion, `${path}.interfaceVersion`); uri(input.manifestUri, `${path}.manifestUri`);
+  token(input.interfaceId, `${path}.interfaceId`); immutableVersion(input.interfaceVersion, `${path}.interfaceVersion`); uri(input.manifestUri, `${path}.manifestUri`);
   digest(input.manifestSha256, `${path}.manifestSha256`); digest(input.interfaceAbiHash, `${path}.interfaceAbiHash`); digest(input.modelAbiHash, `${path}.modelAbiHash`);
   return input;
 }
@@ -388,14 +410,14 @@ export function parseSerializableGpuPipelineDescriptors(
   moduleIds: readonly string[],
   path = "pipelines",
 ): readonly SerializableGpuPipelineDescriptor[] {
-  const parsed = array(value, path).map((item, index) => pipeline(item, `${path}[${index}]`, new Set(moduleIds)));
+  const parsed = array(detachedJson(value, path), path).map((item, index) => pipeline(item, `${path}[${index}]`, new Set(moduleIds)));
   unique(parsed, (item) => item.pipelineId, path);
   return freeze(parsed);
 }
 
 function compatibleModel(value: unknown, path: string): UnknownRecord {
   const input = object(value, path); exact(input, ["interfaceId", "interfaceVersion", "manifestSha256", "interfaceAbiHash", "modelAbiHash"], path);
-  token(input.interfaceId, `${path}.interfaceId`); token(input.interfaceVersion, `${path}.interfaceVersion`); digest(input.manifestSha256, `${path}.manifestSha256`); digest(input.interfaceAbiHash, `${path}.interfaceAbiHash`); digest(input.modelAbiHash, `${path}.modelAbiHash`); return input;
+  token(input.interfaceId, `${path}.interfaceId`); immutableVersion(input.interfaceVersion, `${path}.interfaceVersion`); digest(input.manifestSha256, `${path}.manifestSha256`); digest(input.interfaceAbiHash, `${path}.interfaceAbiHash`); digest(input.modelAbiHash, `${path}.modelAbiHash`); return input;
 }
 
 function validationEvidenceRef(value: unknown, path: string): UnknownRecord {
@@ -405,7 +427,7 @@ function validationEvidenceRef(value: unknown, path: string): UnknownRecord {
   uri(evidence.uri, `${path}.uri`);
   digest(evidence.sha256, `${path}.sha256`);
   token(evidence.matrixId, `${path}.matrixId`);
-  token(evidence.matrixVersion, `${path}.matrixVersion`);
+  immutableVersion(evidence.matrixVersion, `${path}.matrixVersion`);
   digest(evidence.matrixSha256, `${path}.matrixSha256`);
   const attestation = object(evidence.attestationRef, `${path}.attestationRef`);
   exact(attestation, ["uri", "sha256"], `${path}.attestationRef`);
@@ -436,10 +458,10 @@ function reflectedRecordBindingSize(record: GpuRecordLayout): number {
 
 /** Strictly parses untrusted reflected interface JSON and validates all nested references. */
 export function parseGpuInterfaceManifest(value: unknown): GpuInterfaceManifest {
-  const input = object(value, "GpuInterfaceManifest");
+  const input = object(detachedJson(value, "GpuInterfaceManifest"), "GpuInterfaceManifest");
   exact(input, ["contractVersion", "interfaceId", "interfaceVersion", "modules", "records", "bindings", "entryPoints", "vertexInputs", "overrides", "modelAbi", "modelAbiHash", "interfaceAbiHash", "generatedBy"], "GpuInterfaceManifest");
   if (input.contractVersion !== GPU_INTERFACE_MANIFEST_VERSION) throw new TypeError("Unsupported GPU interface contract version.");
-  token(input.interfaceId, "GpuInterfaceManifest.interfaceId"); token(input.interfaceVersion, "GpuInterfaceManifest.interfaceVersion");
+  token(input.interfaceId, "GpuInterfaceManifest.interfaceId"); immutableVersion(input.interfaceVersion, "GpuInterfaceManifest.interfaceVersion");
   const moduleValues = array(input.modules, "GpuInterfaceManifest.modules");
   if (moduleValues.length === 0) throw new TypeError("GpuInterfaceManifest.modules must not be empty.");
   const moduleIds = moduleValues.map((value, index) => { const path = `GpuInterfaceManifest.modules[${index}]`; const module = object(value, path); exact(module, ["moduleId", "sha256"], path); digest(module.sha256, `${path}.sha256`); return token(module.moduleId, `${path}.moduleId`); });
@@ -496,9 +518,9 @@ export function parseGpuInterfaceManifest(value: unknown): GpuInterfaceManifest 
 
 /** Strictly parses an immutable shader-version manifest. */
 export function parseShaderVersionManifest(value: unknown): ShaderVersionManifest {
-  const input = object(value, "ShaderVersionManifest"); exact(input, ["contractVersion", "shaderId", "version", "modules", "gpuInterface", "pipelines", "renderRoles", "compatibleModelInterfaces", "requirements", "shaderAbiHash", "validationEvidence", "additionalValidationEvidence"], "ShaderVersionManifest");
+  const input = object(detachedJson(value, "ShaderVersionManifest"), "ShaderVersionManifest"); exact(input, ["contractVersion", "shaderId", "version", "modules", "gpuInterface", "pipelines", "renderRoles", "compatibleModelInterfaces", "requirements", "shaderAbiHash", "validationEvidence", "additionalValidationEvidence"], "ShaderVersionManifest");
   if (input.contractVersion !== SHADER_VERSION_MANIFEST_VERSION) throw new TypeError("Unsupported shader manifest contract version.");
-  token(input.shaderId, "ShaderVersionManifest.shaderId"); token(input.version, "ShaderVersionManifest.version");
+  token(input.shaderId, "ShaderVersionManifest.shaderId"); immutableVersion(input.version, "ShaderVersionManifest.version");
   const moduleValues = array(input.modules, "ShaderVersionManifest.modules"); if (moduleValues.length === 0) throw new TypeError("ShaderVersionManifest.modules must not be empty."); const moduleIds = moduleValues.map((item, index) => { const path = `ShaderVersionManifest.modules[${index}]`; const module = object(item, path); exact(module, ["moduleId", "uri", "byteLength", "sha256", "contentType"], path); uri(module.uri, `${path}.uri`); integer(module.byteLength, `${path}.byteLength`, 1); digest(module.sha256, `${path}.sha256`); if (module.contentType !== "text/wgsl; charset=utf-8") throw new TypeError(`${path}.contentType is not canonical WGSL.`); return token(module.moduleId, `${path}.moduleId`); }); unique(moduleIds, String, "ShaderVersionManifest.modules"); const moduleSet = new Set(moduleIds);
   const shaderInterface = interfaceRef(input.gpuInterface, "ShaderVersionManifest.gpuInterface");
   const pipelines = array(input.pipelines, "ShaderVersionManifest.pipelines").map((item, index) => pipeline(item, `ShaderVersionManifest.pipelines[${index}]`, moduleSet)); if (pipelines.length === 0) throw new TypeError("ShaderVersionManifest.pipelines must not be empty."); unique(pipelines, (item) => item.pipelineId, "ShaderVersionManifest.pipelines"); const pipelineIds = new Set(pipelines.map((item) => item.pipelineId));
@@ -567,7 +589,7 @@ export function parseShaderVersionManifest(value: unknown): ShaderVersionManifes
 
 /** Strictly parses the cycle-free shader manifest qualified before evidence attachment. */
 export function parseShaderVersionManifestCore(value: unknown): ShaderVersionManifestCore {
-  const input = object(value, "ShaderVersionManifestCore");
+  const input = object(detachedJson(value, "ShaderVersionManifestCore"), "ShaderVersionManifestCore");
   if ("validationEvidence" in input || "additionalValidationEvidence" in input) {
     throw new TypeError("ShaderVersionManifestCore must not contain validationEvidence or additionalValidationEvidence.");
   }
@@ -595,10 +617,10 @@ export function parseShaderVersionManifestCore(value: unknown): ShaderVersionMan
 
 /** Strictly parses a rendering-style profile with exact immutable shader references. */
 export function parseShaderStyleProfileManifest(value: unknown): ShaderStyleProfileManifest {
-  const input = object(value, "ShaderStyleProfileManifest"); exact(input, ["contractVersion", "profileId", "version", "style", "roles", "compatibleModelInterfaces", "requiredSemantics", "requiredValidationScopes"], "ShaderStyleProfileManifest");
+  const input = object(detachedJson(value, "ShaderStyleProfileManifest"), "ShaderStyleProfileManifest"); exact(input, ["contractVersion", "profileId", "version", "style", "roles", "compatibleModelInterfaces", "requiredSemantics", "requiredValidationScopes"], "ShaderStyleProfileManifest");
   if (input.contractVersion !== SHADER_STYLE_PROFILE_MANIFEST_VERSION) throw new TypeError("Unsupported style-profile contract version.");
-  token(input.profileId, "ShaderStyleProfileManifest.profileId"); token(input.version, "ShaderStyleProfileManifest.version"); token(input.style, "ShaderStyleProfileManifest.style");
-  const roleValues = array(input.roles, "ShaderStyleProfileManifest.roles", 5); if (roleValues.length === 0) throw new TypeError("ShaderStyleProfileManifest.roles must not be empty."); const roleNames: string[] = []; roleValues.forEach((item, index) => { const path = `ShaderStyleProfileManifest.roles[${index}]`; const role = object(item, path); exact(role, ["role", "shader"], path); roleNames.push(enumeration(role.role, roles, `${path}.role`)); const shader = object(role.shader, `${path}.shader`); exact(shader, ["shaderId", "version", "manifestUri", "manifestSha256"], `${path}.shader`); token(shader.shaderId, `${path}.shader.shaderId`); token(shader.version, `${path}.shader.version`); uri(shader.manifestUri, `${path}.shader.manifestUri`); digest(shader.manifestSha256, `${path}.shader.manifestSha256`); }); unique(roleNames, String, "ShaderStyleProfileManifest.roles");
+  token(input.profileId, "ShaderStyleProfileManifest.profileId"); immutableVersion(input.version, "ShaderStyleProfileManifest.version"); token(input.style, "ShaderStyleProfileManifest.style");
+  const roleValues = array(input.roles, "ShaderStyleProfileManifest.roles", 5); if (roleValues.length === 0) throw new TypeError("ShaderStyleProfileManifest.roles must not be empty."); const roleNames: string[] = []; roleValues.forEach((item, index) => { const path = `ShaderStyleProfileManifest.roles[${index}]`; const role = object(item, path); exact(role, ["role", "shader"], path); roleNames.push(enumeration(role.role, roles, `${path}.role`)); const shader = object(role.shader, `${path}.shader`); exact(shader, ["shaderId", "version", "manifestUri", "manifestSha256"], `${path}.shader`); token(shader.shaderId, `${path}.shader.shaderId`); immutableVersion(shader.version, `${path}.shader.version`); uri(shader.manifestUri, `${path}.shader.manifestUri`); digest(shader.manifestSha256, `${path}.shader.manifestSha256`); }); unique(roleNames, String, "ShaderStyleProfileManifest.roles");
   const compatible = array(input.compatibleModelInterfaces, "ShaderStyleProfileManifest.compatibleModelInterfaces").map((item, index) => compatibleModel(item, `ShaderStyleProfileManifest.compatibleModelInterfaces[${index}]`)); if (compatible.length === 0) throw new TypeError("ShaderStyleProfileManifest.compatibleModelInterfaces must not be empty."); unique(compatible, (item) => `${item.interfaceId}:${item.interfaceVersion}:${item.manifestSha256}:${item.interfaceAbiHash}:${item.modelAbiHash}`, "ShaderStyleProfileManifest.compatibleModelInterfaces"); tokenArray(input.requiredSemantics, "ShaderStyleProfileManifest.requiredSemantics");
   const requiredValidationScopes = array(input.requiredValidationScopes, "ShaderStyleProfileManifest.requiredValidationScopes").map((item, index) => {
     const path = `ShaderStyleProfileManifest.requiredValidationScopes[${index}]`;
@@ -607,7 +629,7 @@ export function parseShaderStyleProfileManifest(value: unknown): ShaderStyleProf
     const scope = token(requirement.scope, `${path}.scope`);
     if (scope === "universal") throw new TypeError(`${path}.scope must not use the reserved universal scope.`);
     token(requirement.matrixId, `${path}.matrixId`);
-    token(requirement.matrixVersion, `${path}.matrixVersion`);
+    immutableVersion(requirement.matrixVersion, `${path}.matrixVersion`);
     const matrixSha256 = digest(requirement.matrixSha256, `${path}.matrixSha256`);
     if (SUPPORTED_STABLE_WEBGPU_MATRIX_POLICIES.some((policy) => policy.matrixSha256 === matrixSha256)) {
       throw new TypeError(`${path} must require an additive matrix policy, not the universal matrix policy.`);
@@ -628,21 +650,24 @@ export function parseShaderStyleProfileManifest(value: unknown): ShaderStyleProf
 
 /** Strictly parses the model-facing GPU compatibility fields published with a model version. */
 export function parseModelGpuCompatibilityDescriptor(value: unknown): ModelGpuCompatibilityDescriptor {
-  const input = object(value, "ModelGpuCompatibilityDescriptor");
+  const input = object(detachedJson(value, "ModelGpuCompatibilityDescriptor"), "ModelGpuCompatibilityDescriptor");
   exact(input, ["modelId", "version", "gpuInterface", "modelAbiHash", "providedSemantics", "defaultStyleProfile"], "ModelGpuCompatibilityDescriptor");
   token(input.modelId, "ModelGpuCompatibilityDescriptor.modelId");
-  token(input.version, "ModelGpuCompatibilityDescriptor.version");
+  immutableVersion(input.version, "ModelGpuCompatibilityDescriptor.version");
   const gpuInterface = interfaceRef(input.gpuInterface, "ModelGpuCompatibilityDescriptor.gpuInterface");
   const modelAbiHash = digest(input.modelAbiHash, "ModelGpuCompatibilityDescriptor.modelAbiHash");
   if (gpuInterface.modelAbiHash !== modelAbiHash) throw new TypeError("ModelGpuCompatibilityDescriptor.gpuInterface.modelAbiHash differs from modelAbiHash.");
   tokenArray(input.providedSemantics, "ModelGpuCompatibilityDescriptor.providedSemantics");
-  if (input.defaultStyleProfile !== null) { const profile = object(input.defaultStyleProfile, "ModelGpuCompatibilityDescriptor.defaultStyleProfile"); exact(profile, ["profileId", "version", "manifestUri", "manifestSha256"], "ModelGpuCompatibilityDescriptor.defaultStyleProfile"); token(profile.profileId, "ModelGpuCompatibilityDescriptor.defaultStyleProfile.profileId"); token(profile.version, "ModelGpuCompatibilityDescriptor.defaultStyleProfile.version"); uri(profile.manifestUri, "ModelGpuCompatibilityDescriptor.defaultStyleProfile.manifestUri"); digest(profile.manifestSha256, "ModelGpuCompatibilityDescriptor.defaultStyleProfile.manifestSha256"); }
+  if (input.defaultStyleProfile !== null) { const profile = object(input.defaultStyleProfile, "ModelGpuCompatibilityDescriptor.defaultStyleProfile"); exact(profile, ["profileId", "version", "manifestUri", "manifestSha256"], "ModelGpuCompatibilityDescriptor.defaultStyleProfile"); token(profile.profileId, "ModelGpuCompatibilityDescriptor.defaultStyleProfile.profileId"); immutableVersion(profile.version, "ModelGpuCompatibilityDescriptor.defaultStyleProfile.version"); uri(profile.manifestUri, "ModelGpuCompatibilityDescriptor.defaultStyleProfile.manifestUri"); digest(profile.manifestSha256, "ModelGpuCompatibilityDescriptor.defaultStyleProfile.manifestSha256"); }
   return freeze(input as unknown as ModelGpuCompatibilityDescriptor);
 }
 
 /** Strictly parses a qualification fixture that binds one immutable model descriptor. */
 export function parseShaderQualificationModelCompatibilityFixture(value: unknown): ShaderQualificationModelCompatibilityFixture {
-  const input = object(value, "ShaderQualificationModelCompatibilityFixture");
+  const input = object(
+    detachedJson(value, "ShaderQualificationModelCompatibilityFixture"),
+    "ShaderQualificationModelCompatibilityFixture",
+  );
   exact(input, ["contractVersion", "fixtureId", "model"], "ShaderQualificationModelCompatibilityFixture");
   if (input.contractVersion !== SHADER_QUALIFICATION_FIXTURE_VERSION) throw new TypeError("Unsupported model compatibility fixture version.");
   token(input.fixtureId, "ShaderQualificationModelCompatibilityFixture.fixtureId");
