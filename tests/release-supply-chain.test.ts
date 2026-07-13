@@ -361,6 +361,11 @@ describe("release workflow policy", () => {
     expect(publish).toMatch(/digest\(["']sha256["']/u);
     expect(publish).toMatch(/digest\(["']sha512["']/u);
     expect(publish).toContain("npm audit signatures");
+    expect(publish).toContain('SIGNATURE_WAIT_SECONDS: "180"');
+    expect(publish).toContain('SIGNATURE_DEADLINE=$((SECONDS + SIGNATURE_WAIT_SECONDS))');
+    expect(publish).toContain('SIGNATURE_ATTEMPT=$((SIGNATURE_ATTEMPT + 1))');
+    expect(publish).toContain('sleep 5');
+    expect(publish).toContain('npm signature verification did not converge');
     expect(publish).toMatch(
       /npm publish "\$\{TARBALL_PATH\}"[^\n]*--ignore-scripts[^\n]*--provenance/u,
     );

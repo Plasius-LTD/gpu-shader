@@ -879,15 +879,54 @@ jobs:
           NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-signature-cache
           PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
           PACKAGE_VERSION: ${{ steps.release.outputs.release_version }}
+          SIGNATURE_WAIT_SECONDS: "180"
         run: |
           set -euo pipefail
+          if ! [[ "${SIGNATURE_WAIT_SECONDS}" =~ ^[0-9]+$ ]] || [ "${SIGNATURE_WAIT_SECONDS}" -lt 30 ] || [ "${SIGNATURE_WAIT_SECONDS}" -gt 300 ]; then
+            echo "Signature propagation wait must be from 30 through 300 seconds." >&2
+            exit 1
+          fi
+
           VERIFY_DIR="${RUNNER_TEMP}/npm-release-signature-verification"
-          rm -rf "${VERIFY_DIR}"
-          mkdir -p "${VERIFY_DIR}"
-          cd "${VERIFY_DIR}"
-          npm init --yes >/dev/null
-          npm install --ignore-scripts --omit=optional --no-save "${PACKAGE_NAME}@${PACKAGE_VERSION}" --registry https://registry.npmjs.org
-          npm audit signatures --registry https://registry.npmjs.org
+          INSTALL_LOG="${RUNNER_TEMP}/npm-release-signature-install.log"
+          AUDIT_LOG="${RUNNER_TEMP}/npm-release-signature-audit.log"
+          SIGNATURE_DEADLINE=$((SECONDS + SIGNATURE_WAIT_SECONDS))
+          SIGNATURE_ATTEMPT=0
+
+          while true; do
+            SIGNATURE_ATTEMPT=$((SIGNATURE_ATTEMPT + 1))
+            cd "${RUNNER_TEMP}"
+            rm -rf "${VERIFY_DIR}"
+            rm -f "${INSTALL_LOG}" "${AUDIT_LOG}"
+            mkdir -p "${VERIFY_DIR}"
+            cd "${VERIFY_DIR}"
+            npm init --yes >/dev/null
+
+            set +e
+            npm install --ignore-scripts --omit=optional --no-save "${PACKAGE_NAME}@${PACKAGE_VERSION}" --registry https://registry.npmjs.org >"${INSTALL_LOG}" 2>&1
+            INSTALL_STATUS=$?
+            AUDIT_STATUS=125
+            if [ "${INSTALL_STATUS}" -eq 0 ]; then
+              npm audit signatures --registry https://registry.npmjs.org >"${AUDIT_LOG}" 2>&1
+              AUDIT_STATUS=$?
+            fi
+            set -e
+
+            if [ "${INSTALL_STATUS}" -eq 0 ] && [ "${AUDIT_STATUS}" -eq 0 ]; then
+              cat "${INSTALL_LOG}"
+              cat "${AUDIT_LOG}"
+              echo "npm signature verification converged on attempt ${SIGNATURE_ATTEMPT}."
+              break
+            fi
+            if [ "${SECONDS}" -ge "${SIGNATURE_DEADLINE}" ]; then
+              echo "npm signature verification did not converge within ${SIGNATURE_WAIT_SECONDS} seconds." >&2
+              sed -n '1,80p' "${INSTALL_LOG}" >&2
+              if [ -f "${AUDIT_LOG}" ]; then sed -n '1,80p' "${AUDIT_LOG}" >&2; fi
+              exit 1
+            fi
+            echo "Waiting for npm install/signature propagation after attempt ${SIGNATURE_ATTEMPT} (install=${INSTALL_STATUS}, audit=${AUDIT_STATUS})."
+            sleep 5
+          done
 
       - name: Publish GitHub release
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0

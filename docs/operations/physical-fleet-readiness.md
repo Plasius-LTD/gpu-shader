@@ -130,6 +130,11 @@ The second run has two deliberately separated stages:
 An interrupted release is resumed with a new `bump: none` dispatch from the
 same prepared `main` commit. Every recovery still repeats the exact-commit CI,
 artifact-integrity, provenance, signature, tag, and release checks.
+The npm install and signature endpoint may briefly lag the metadata and
+attestation endpoints after first publication. CD retries that final
+install/signature check for a bounded three minutes, without skipping or
+weakening it; if propagation does not converge, the draft remains unpublished
+and another `bump: none` run safely resumes the same immutable version.
 
 ## Runner labels and attestation
 
