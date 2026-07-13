@@ -1,6 +1,8 @@
-import { readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 interface PackedArtifact {
@@ -25,6 +27,22 @@ interface PackModule {
 }
 
 interface VerificationModule {
+  REGISTRY_REQUEST_TIMEOUT_MS: number;
+  resolvePublishedRelease(
+    expected: Omit<ReleaseExpectation, "integrity" | "commit">,
+    attempts?: number,
+    intervalMs?: number,
+  ): Promise<unknown>;
+  resolveReleaseRecord(
+    metadata: unknown,
+    attestations: unknown,
+    expected: Omit<ReleaseExpectation, "integrity" | "commit">,
+  ): {
+    attestationUrl: string;
+    commit: string;
+    integrity: string;
+    invocationId: string;
+  };
   verifyReleaseRecord(
     metadata: unknown,
     attestations: unknown,
@@ -141,6 +159,22 @@ function expectReadOnlyWorkflowPermissions(permissions: string): void {
   expect(permissions).not.toMatch(/:\s*write(?:\s|$)/u);
 }
 
+function inlineNodeStepSource(workflow: string, stepName: string): string {
+  const stepStart = workflow.indexOf(`      - name: ${stepName}`);
+  if (stepStart < 0) throw new Error(`Workflow step not found: ${stepName}`);
+  const nextStep = workflow.indexOf("\n      - name:", stepStart + 1);
+  const block = workflow.slice(stepStart, nextStep < 0 ? undefined : nextStep);
+  const marker = "          node <<'NODE'\n";
+  const sourceStart = block.indexOf(marker);
+  const sourceEnd = block.indexOf("\n          NODE", sourceStart + marker.length);
+  if (sourceStart < 0 || sourceEnd < 0) throw new Error(`Inline Node source not found: ${stepName}`);
+  return block
+    .slice(sourceStart + marker.length, sourceEnd)
+    .split(/\r?\n/u)
+    .map((line) => line.startsWith("          ") ? line.slice(10) : line)
+    .join("\n");
+}
+
 describe("immutable npm release preparation", () => {
   it("accepts one exact bounded npm pack result", () => {
     const raw = JSON.stringify([
@@ -191,6 +225,90 @@ describe("immutable npm release preparation", () => {
 });
 
 describe("npm release provenance verification", () => {
+  it("bounds registry requests and retry policy", async () => {
+    expect(verificationModule.REGISTRY_REQUEST_TIMEOUT_MS).toBe(10_000);
+    const authority = {
+      packageName,
+      version,
+      repository,
+      workflow: ".github/workflows/cd.yml",
+    };
+    await expect(verificationModule.resolvePublishedRelease(authority, 0, 0)).rejects.toThrow(
+      /attempts/u,
+    );
+    await expect(verificationModule.resolvePublishedRelease(authority, 1, 10_001)).rejects.toThrow(
+      /interval/u,
+    );
+  });
+
+  it("derives the immutable release commit from exact npm provenance", () => {
+    const fixture = releaseFixture();
+    expect(
+      verificationModule.resolveReleaseRecord(fixture.metadata, fixture.attestations, {
+        packageName,
+        version,
+        repository,
+        workflow: ".github/workflows/cd.yml",
+      }),
+    ).toEqual({
+      attestationUrl:
+        "https://registry.npmjs.org/-/npm/v1/attestations/@plasius%2fgpu-shader@0.1.0",
+      commit,
+      integrity,
+      invocationId: `https://github.com/${repository}/actions/runs/123/attempts/1`,
+    });
+  });
+
+  it("rejects ambiguous published provenance authority", () => {
+    const duplicateDependency = releaseFixture();
+    const attestations = duplicateDependency.attestations as {
+      attestations: Array<{ bundle: { dsseEnvelope: { payload: string } } }>;
+    };
+    const statement = JSON.parse(
+      Buffer.from(attestations.attestations[0]!.bundle.dsseEnvelope.payload, "base64").toString(
+        "utf8",
+      ),
+    ) as {
+      predicate: { buildDefinition: { resolvedDependencies: unknown[] } };
+    };
+    statement.predicate.buildDefinition.resolvedDependencies.push({
+      uri: `git+https://github.com/${repository}@refs/heads/main`,
+      digest: { gitCommit: "b".repeat(40) },
+    });
+    attestations.attestations[0]!.bundle.dsseEnvelope.payload = Buffer.from(
+      JSON.stringify(statement),
+    ).toString("base64");
+
+    expect(() =>
+      verificationModule.resolveReleaseRecord(
+        duplicateDependency.metadata,
+        duplicateDependency.attestations,
+        {
+          packageName,
+          version,
+          repository,
+          workflow: ".github/workflows/cd.yml",
+        },
+      ),
+    ).toThrow(/exactly one protected-main source commit/u);
+
+    const duplicateAttestation = releaseFixture();
+    const duplicateDocument = duplicateAttestation.attestations as { attestations: unknown[] };
+    duplicateDocument.attestations.push(duplicateDocument.attestations[0]);
+    expect(() =>
+      verificationModule.resolveReleaseRecord(
+        duplicateAttestation.metadata,
+        duplicateAttestation.attestations,
+        {
+          packageName,
+          version,
+          repository,
+          workflow: ".github/workflows/cd.yml",
+        },
+      ),
+    ).toThrow(/exactly one SLSA provenance attestation/u);
+  });
+
   it("binds registry bytes to the exact main CD workflow and commit", () => {
     const fixture = releaseFixture();
     expect(
@@ -271,6 +389,19 @@ describe("release workflow policy", () => {
   it("keeps release preparation read-only and disables dependency lifecycle scripts", () => {
     expectReadOnlyWorkflowPermissions(workflowBlock(cd, "permissions", 0));
     expectReadOnlyWorkflowPermissions(workflowBlock(prepare, "permissions", 0));
+    const resolveRelease = workflowBlock(prepare, "resolve_release", 2);
+    expect(resolveRelease).toContain("needs: prepare");
+    expect(resolveRelease).not.toContain("environment:");
+    expectReadOnlyWorkflowPermissions(workflowBlock(resolveRelease, "permissions", 4));
+    expect(resolveRelease).toContain(
+      "ref: ${{ needs.prepare.outputs.validation_commit_sha }}",
+    );
+    expect(resolveRelease).toContain("persist-credentials: false");
+    expect(resolveRelease).toContain("node-version: '24.13.0'");
+    expect(prepare).not.toContain("node-version-file:");
+    expect(prepare.match(/node-version: '24[.]13[.]0'/gu)).toHaveLength(2);
+    expect(resolveRelease).not.toContain("GH_TOKEN");
+    expect(resolveRelease).not.toContain("RELEASE_PREP_AUTH_TOKEN");
     expectReadOnlyWorkflowPermissions(
       workflowBlock(workflowBlock(cd, "prepare_release", 2), "permissions", 4),
     );
@@ -295,14 +426,20 @@ describe("release workflow policy", () => {
     expectReadOnlyWorkflowPermissions(workflowBlock(validate, "permissions", 4));
     expect(validate).not.toContain("id-token: write");
 
-    expect(validate).toContain("${{ needs.prepare_release.outputs.commit_sha }}");
-    expect(validate).toMatch(
-      /(?:PREPARED_SHA|EXPECTED_SHA): \$\{\{ needs\.prepare_release\.outputs\.commit_sha \}\}/u,
+    expect(validate).toContain("ref: ${{ needs.prepare_release.outputs.release_commit_sha }}");
+    expect(validate).toContain(
+      "VALIDATION_SHA: ${{ needs.prepare_release.outputs.validation_commit_sha }}",
+    );
+    expect(validate).toContain(
+      "RELEASE_SHA: ${{ needs.prepare_release.outputs.release_commit_sha }}",
     );
     expect(validate).toMatch(
-      /if \[ "\$\{GITHUB_SHA\}" != "\$\{(?:PREPARED_SHA|EXPECTED_SHA)\}" \]; then/u,
+      /if \[ "\$\{GITHUB_SHA\}" != "\$\{VALIDATION_SHA\}" \]; then/u,
     );
-    expect(validate).toContain("Wait for successful CI on exact prepared commit");
+    expect(validate).toContain('if [ "${ACTUAL_SHA}" != "${RELEASE_SHA}" ]; then');
+    expect(validate).toContain("Wait for successful CI on exact validation commit");
+    expect(validate).toContain('node-version: "24.13.0"');
+    expect(validate).not.toContain("node-version-file:");
     expect(validate).toContain("npm ci");
     expect(validate).toContain("npm run lint");
     expect(validate).toContain("npm run typecheck");
@@ -311,6 +448,13 @@ describe("release workflow policy", () => {
     expect(validate).toContain("npm run test:coverage");
     expect(validate).toContain("npm run pack:check");
     expect(validate).toContain("node scripts/prepare-npm-release.cjs release-artifacts");
+    expect(validate).toContain("Generate reproducible SBOM (CycloneDX)");
+    expect(validate).toContain('export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${EXPECTED_RELEASE_COMMIT}")"');
+    expect(validate).toContain("delete document.serialNumber");
+    expect(validate).toContain("delete document.metadata.timestamp");
+    expect(validate).toContain('crypto.createHash("sha256").update("plasius-npm-sbom-v1\\0")');
+    expect(validate).toContain("Object.keys(value).sort()");
+    expect(validate).toContain('flag: "wx"');
 
     expect(validate).toContain(
       "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
@@ -321,8 +465,59 @@ describe("release workflow policy", () => {
     expect(validate).toContain("release-artifacts/*.tgz");
     expect(validate).toContain("release-artifacts/sbom.cdx.json");
     expect(validate).toContain("release-artifacts/release-transport.json");
+    expect(validate).toContain("schemaVersion: 2");
+    expect(validate).toContain("validationCommitSha: env.EXPECTED_VALIDATION_COMMIT");
+    expect(validate).toContain("releaseCommitSha: env.EXPECTED_RELEASE_COMMIT");
     expect(validate).toContain("artifact_id: ${{ steps.upload.outputs.artifact-id }}");
     expect(validate).toContain("artifact_digest: ${{ steps.upload.outputs.artifact-digest }}");
+  });
+
+  it("normalizes npm's volatile SBOM fields into reproducible release bytes", () => {
+    const source = inlineNodeStepSource(cd, "Generate reproducible SBOM (CycloneDX)");
+    const root = mkdtempSync(join(tmpdir(), "gpu-shader-sbom-"));
+    try {
+      const outputs: string[] = [];
+      for (const volatile of [
+        { serialNumber: "urn:uuid:11111111-1111-4111-8111-111111111111", timestamp: "2026-01-01T00:00:00.000Z" },
+        { serialNumber: "urn:uuid:22222222-2222-4222-8222-222222222222", timestamp: "2026-07-13T12:34:56.789Z" },
+      ]) {
+        const work = join(root, String(outputs.length));
+        mkdirSync(join(work, "release-artifacts"), { recursive: true });
+        const raw = join(work, "raw.json");
+        writeFileSync(raw, JSON.stringify({
+          bomFormat: "CycloneDX",
+          specVersion: "1.6",
+          serialNumber: volatile.serialNumber,
+          metadata: {
+            timestamp: volatile.timestamp,
+            component: { name: "gpu-shader", version: "0.1.0" },
+          },
+          components: [{ version: "1.0.0", name: "fixture" }],
+        }));
+        const result = spawnSync(process.execPath, ["-"], {
+          cwd: work,
+          encoding: "utf8",
+          input: source,
+          env: {
+            ...process.env,
+            EXPECTED_RELEASE_COMMIT: commit,
+            SOURCE_DATE_EPOCH: "1_750_000_000".replaceAll("_", ""),
+            RAW_SBOM: raw,
+          },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        outputs.push(readFileSync(join(work, "release-artifacts/sbom.cdx.json"), "utf8"));
+      }
+      expect(outputs[0]).toBe(outputs[1]);
+      const normalized = JSON.parse(outputs[0] ?? "") as {
+        serialNumber: string;
+        metadata: { timestamp: string };
+      };
+      expect(normalized.serialNumber).toMatch(/^urn:uuid:[a-f0-9]{8}-[a-f0-9]{4}-5[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/u);
+      expect(normalized.metadata.timestamp).toBe("2025-06-15T15:06:40.000Z");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it("publishes only an independently verified artifact from the privileged job", () => {
@@ -376,6 +571,24 @@ describe("release workflow policy", () => {
       publish.indexOf("Attest exact npm tarball"),
     );
     expect(publish).toContain("REGISTRY_PUBLISHED: ${{ steps.registry.outputs.published }}");
+    expect(publish).toContain(
+      "EXPECTED_VALIDATION_COMMIT: ${{ needs.prepare_release.outputs.validation_commit_sha }}",
+    );
+    expect(publish).toContain(
+      "EXPECTED_RELEASE_COMMIT: ${{ needs.prepare_release.outputs.release_commit_sha }}",
+    );
+    expect(publish).toContain("transport.schemaVersion !== 2");
+    expect(publish).toContain("steps.registry.outputs.published != 'true'");
+    expect(publish).toContain("const requestTimeoutMs = 10_000");
+    expect(publish).toContain("signal: AbortSignal.timeout(requestTimeoutMs)");
+    expect(publish).toContain("provenances.length !== 1");
+    expect(publish).toContain("protectedMainDependencies.length !== 1");
+    expect(publish).toContain(
+      '/^[1-9][0-9]*\\/attempts\\/[1-9][0-9]*$/.test(invocationSuffix)',
+    );
+    expect(publish).toContain(
+      'if [ "${VALIDATION_COMMIT_SHA}" != "${RELEASE_COMMIT_SHA}" ] && [ "${PREPARED_PUBLISHED}" != "true" ]; then',
+    );
     expect(publish).not.toContain("${{ inputs.preid }}");
     expect(publish).toContain('assets.length !== 1');
     expect(publish).toContain('"prerelease", "distTag"');
@@ -388,7 +601,7 @@ describe("release workflow policy", () => {
 
   it("keeps every inline release verifier syntactically valid", () => {
     const snippets = [...cd.matchAll(/^ {10,12}(?:[^\n]* )?node( --input-type=module)? <<'NODE'\n([\s\S]*?)^ {10}NODE$/gmu)];
-    expect(snippets).toHaveLength(4);
+    expect(snippets).toHaveLength(5);
     for (const [, moduleFlag, indentedSource] of snippets) {
       const source = (indentedSource ?? "")
         .split(/\r?\n/u)
@@ -426,6 +639,29 @@ describe("release workflow policy", () => {
     }
   });
 
+  it("keeps release preparation shell syntax valid", () => {
+    for (const name of [
+      "Prepare and land release metadata",
+      "Resolve immutable release source authority",
+    ]) {
+      const stepName = `      - name: ${name}`;
+      const stepStart = prepare.indexOf(stepName);
+      const runStart = prepare.indexOf("        run: |\n", stepStart);
+      expect(stepStart).toBeGreaterThanOrEqual(0);
+      expect(runStart).toBeGreaterThan(stepStart);
+      const sourceLines: string[] = [];
+      for (const line of prepare.slice(runStart + "        run: |\n".length).split(/\r?\n/u)) {
+        if (line.length > 0 && !line.startsWith("          ")) break;
+        sourceLines.push(line.startsWith("          ") ? line.slice(10) : line);
+      }
+      const checked = spawnSync("bash", ["-n"], {
+        input: sourceLines.join("\n"),
+        encoding: "utf8",
+      });
+      expect(checked.status, `${name}: ${checked.stderr}`).toBe(0);
+    }
+  });
+
   it("limits automated maintenance writes to the reviewed package lock pull request", () => {
     expectReadOnlyWorkflowPermissions(workflowBlock(audit, "permissions", 0));
     expect(audit).toContain("persist-credentials: false");
@@ -433,7 +669,20 @@ describe("release workflow policy", () => {
   });
 
   it("uses main HEAD and never pushes release metadata directly to main", () => {
-    expect(prepare).toContain("COMMIT_SHA=$(git rev-parse HEAD)");
+    expect(prepare).toContain("VALIDATION_COMMIT_SHA=$(git rev-parse HEAD)");
+    expect(prepare).toContain("resolvePublishedRelease");
+    expect(prepare.indexOf("  resolve_release:")).toBeGreaterThan(
+      prepare.indexOf('RELEASE_PREP_AUTH_TOKEN: ${{ steps.release_prep_app_token.outputs.token }}'),
+    );
+    expect(prepare).toContain('if [ "${BUMP}" != "none" ]; then');
+    expect(prepare).toContain(
+      'TAG_COMMIT_SHA=$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")',
+    );
+    expect(prepare).toContain('git merge-base --is-ancestor "${RELEASE_COMMIT_SHA}"');
+    expect(prepare).toContain("validation_commit_sha=${VALIDATION_COMMIT_SHA}");
+    expect(prepare).toContain("release_commit_sha=${RELEASE_COMMIT_SHA}");
+    expect(prepare).not.toContain("commit_sha=${COMMIT_SHA}");
+    expect(cd).not.toContain("needs.prepare_release.outputs.commit_sha");
     expect(prepare).not.toContain('git push origin "HEAD:${BASE_BRANCH}"');
     expect(prepare).toContain('BRANCH_PROTECTED="$(gh api');
     expect(prepare).toContain('ALLOW_AUTO_MERGE="$(gh api');

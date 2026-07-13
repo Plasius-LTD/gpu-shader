@@ -70,31 +70,42 @@ Release preparation always opens a short-lived `release/v*` pull request with
 an installation token from the repository's release-preparation GitHub App.
 The workflow refuses to mutate metadata unless `main` is protected and
 repository auto-merge is enabled. The workflow-dispatch SHA must equal the
-prepared commit before any release artifact is built. If preparation merges a
-package or changelog metadata commit, the original run remains bound to its
-earlier SHA and stops before publication. Start a second `bump: none` run from
-the newly prepared `main` commit; `bump: none` resumes that exact version and
-does not replace version preparation.
+protected-main validation commit before any release artifact is built. If
+preparation merges package or changelog metadata, the original run remains
+bound to its earlier SHA and stops before publication. Start a second
+`bump: none` run from the newly prepared `main` commit; `bump: none` resumes
+that exact version and does not replace version preparation.
 
 CD then crosses an explicit privilege boundary. The read-only,
 unprivileged `validate-and-pack` job waits for successful push CI on the exact
-prepared commit, installs dependencies, runs all release gates, and packs the
-package once. It uploads an attempt-scoped artifact containing exactly the npm
-tarball, CycloneDX SBOM, and transport manifest; the artifact and manifest bind
-their file sizes, digests, package identity, prepared commit, and workflow run.
+validation commit, checks out the immutable release source commit, installs
+dependencies, runs all release gates, and packs the package once. For a new
+publication those commits must be identical. During recovery of an exact
+already-published version, the release commit is derived from npm SLSA
+provenance, must match the existing tag, and must remain an ancestor of the
+validation commit. The attempt-scoped artifact contains exactly the npm
+tarball, reproducible CycloneDX SBOM, and transport manifest; the release uses
+a fixed Node/npm toolchain, and npm's volatile SBOM UUID and timestamp are
+deterministically derived from the release source before schema v2 binds both
+commit authorities, the file sizes and digests, package identity, and workflow
+run.
 The production `publish` job does not check out the repository or execute
 checked-out package code. It downloads the artifact by its exact run-scoped identity
 and GitHub artifact digest, revalidates the three-file closure and every bound
 digest, resolves authoritative live npm state, and preflights the complete
 GitHub tag/release/SBOM state before any mutation. Prerelease status and the npm
 dist-tag are derived from the transported semantic version rather than retry
-inputs. Only then does the job attest, tag, publish, and finalize the release.
+inputs. For a new publication, only then does the job attest, tag, publish, and
+finalize the release. For an already-published recovery it verifies and
+reconciles the same immutable state but does not create replacement tarball or
+SBOM attestations.
 
 Publication and recovery use that same tarball identity: an existing registry
 version is accepted only when its SHA-512 integrity is identical. CD requires
-npm SLSA provenance for the exact `main` commit and `cd.yml` workflow, verifies
-npm registry signatures, and confirms the GitHub tag and non-draft release
-point to the same commit.
+npm SLSA provenance for the immutable release commit and protected-main
+`cd.yml`, verifies npm registry signatures, and confirms the GitHub tag and
+non-draft release point to that release commit. Recovery does not create new
+tarball or SBOM attestations under the newer validation commit.
 
 The first public version requires the production-environment `NPM_TOKEN`
 because npm trusted publishing cannot be configured until the package exists.

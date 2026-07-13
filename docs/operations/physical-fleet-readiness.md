@@ -93,11 +93,12 @@ generated per job and is never stored as a long-lived token.
 
 ### Release privilege boundary and two-run preparation
 
-The workflow-dispatch event SHA is immutable for the life of a run. CD requires
-that SHA to equal the prepared commit before it builds a release artifact. A
+The workflow-dispatch event SHA is immutable for the life of a run. CD treats
+that SHA as the protected-main validation commit and requires an exact match
+before it builds a release artifact. A
 run that creates and merges a package or changelog metadata commit therefore
 stops before publication: its event still identifies the earlier `main` commit.
-After exact push CI has completed for the prepared commit, dispatch `cd.yml`
+After exact push CI has completed for the new validation commit, dispatch `cd.yml`
 again from that new `main` with `bump: none`. Do not use `bump: none` to skip
 version preparation; it may only resume the exact version already present on
 `main`.
@@ -106,30 +107,43 @@ The second run has two deliberately separated stages:
 
 1. `validate-and-pack` has read-only Actions and contents permissions and no
    production environment, write token, npm credential, attestation permission,
-   or OIDC permission. It verifies the dispatch/prepared commit identity, waits
-   for successful push CI on that exact commit, executes repository validation,
-   and packs once. Its attempt-scoped transport artifact contains exactly the
-   npm tarball, CycloneDX SBOM, and `release-transport.json`; the transport
-   manifest binds the repository, commit, package/version, publication state,
-   file sizes, and cryptographic digests.
+   or OIDC permission. It verifies the dispatch/validation commit identity,
+   waits for successful push CI on that exact commit, then checks out, validates,
+   and packs the immutable release source commit. Its attempt-scoped transport
+   artifact contains exactly the npm tarball, reproducible CycloneDX SBOM, and
+   `release-transport.json`; a
+   fixed Node/npm release toolchain is used and npm's volatile SBOM UUID and
+   timestamp are normalized from the immutable release source before the
+   transport manifest schema v2 binds the repository, validation commit,
+   release commit, package/version, publication state, file sizes, and
+   cryptographic digests.
 2. `publish` enters the protected `production` environment and receives only
    the permissions needed to attest and publish. It does not check out the
    repository, install its dependency graph, run lifecycle scripts, or execute
-   repository-authored code. It downloads the exact current-run artifact by
-   ID, name, and GitHub digest; independently verifies the three-file closure,
-   manifest schema, package identity, SBOM identity, sizes, and digests; and
+   checked-out package or release-tree code. It downloads the exact current-run
+   artifact by ID, name, and GitHub digest; independently verifies the
+   three-file closure, manifest schema, package identity, SBOM identity, sizes,
+   and digests; and
    then resolves live npm state and preflights the full GitHub tag, release, and
    exact one-SBOM asset closure before any mutation. It derives prerelease and
-   dist-tag state from the transported version, not the retry input. Only then
-   does it attest, reconcile the tag and draft release, publish the exact
-   tarball with scripts disabled and provenance enabled, verify registry
-   integrity/provenance/signatures, and publish the GitHub release. Unexpected
+   dist-tag state from the transported version, not the retry input. For a new
+   version only, it then attests; for both publication and recovery it
+   reconciles the tag and draft release, publishes or verifies the exact
+   tarball with scripts disabled and provenance enabled, verifies registry
+   integrity/provenance/signatures, and publishes the GitHub release. Unexpected
    assets are removed from drafts and cause published-release recovery to fail
    closed.
 
-An interrupted release is resumed with a new `bump: none` dispatch from the
-same prepared `main` commit. Every recovery still repeats the exact-commit CI,
-artifact-integrity, provenance, signature, tag, and release checks.
+For a new publication, the validation and release commits must be identical.
+An interrupted already-published release may be resumed from a newer
+protected-main validation commit with `bump: none`: CD derives the immutable
+release commit from the exact npm SLSA record, requires the existing tag to
+resolve to that commit, and requires it to remain in protected-main history.
+It rebuilds from that release commit rather than rebinding the package to newer
+source. Every recovery still repeats validation-commit CI, release-source
+validation, artifact-integrity, provenance, signature, tag, and release checks.
+Split commit authorities are forbidden while the exact npm version is absent,
+and recovery skips new tarball/SBOM attestations under the newer validation SHA.
 The npm install and signature endpoint may briefly lag the metadata and
 attestation endpoints after first publication. CD retries that final
 install/signature check for a bounded three minutes, without skipping or
