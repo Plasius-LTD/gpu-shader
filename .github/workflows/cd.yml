@@ -647,12 +647,13 @@ jobs:
             } catch (cause) {
               if (!notFound(cause)) throw cause;
             }
-            let release;
-            try {
-              release = (await github.rest.repos.getReleaseByTag({ owner: context.repo.owner, repo: context.repo.repo, tag })).data;
-            } catch (cause) {
-              if (!notFound(cause)) throw cause;
-            }
+            const matchingReleases = (await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            })).filter((candidate) => candidate.tag_name === tag);
+            if (matchingReleases.length > 1) throw new Error(`Multiple GitHub releases use ${tag}; recovery fails closed.`);
+            const release = matchingReleases[0];
 
             if (registryPublished && tagTarget !== expectedSha) throw new Error("Published npm bytes do not have an exact immutable GitHub tag; recovery fails closed.");
             if (release && !release.draft) {
@@ -714,12 +715,14 @@ jobs:
                 return;
               }
               if (published) throw new Error(`Published package tag ${tag} resolves to ${target}, not ${expectedSha}.`);
-              try {
-                const release = (await github.rest.repos.getReleaseByTag({ owner: context.repo.owner, repo: context.repo.repo, tag })).data;
-                if (!release.draft) throw new Error(`Published GitHub release ${tag} points at a different commit; cut a new version.`);
-              } catch (cause) {
-                if (!notFound(cause)) throw cause;
-              }
+              const matchingReleases = (await github.paginate(github.rest.repos.listReleases, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                per_page: 100,
+              })).filter((candidate) => candidate.tag_name === tag);
+              if (matchingReleases.length > 1) throw new Error(`Multiple GitHub releases use ${tag}; recovery fails closed.`);
+              const release = matchingReleases[0];
+              if (release && !release.draft) throw new Error(`Published GitHub release ${tag} points at a different commit; cut a new version.`);
               await github.rest.git.deleteRef({ owner: context.repo.owner, repo: context.repo.repo, ref: `tags/${tag}` });
             } else if (published) {
               throw new Error(`Package is published but tag ${tag} is missing; recovery fails closed.`);
@@ -747,13 +750,13 @@ jobs:
             if (!/^v[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/.test(tag) || !/^[a-f0-9]{40}$/.test(expectedSha) || !/^[a-f0-9]{64}$/.test(sbomSha256) || !/^(?:true|false)$/.test(prereleaseText) || !/^(?:true|false)$/.test(registryText)) throw new Error("Draft release inputs are malformed.");
             const prerelease = prereleaseText === "true";
             const registryPublished = registryText === "true";
-            const notFound = (cause) => cause?.status === 404;
-            let release;
-            try {
-              release = (await github.rest.repos.getReleaseByTag({ owner: context.repo.owner, repo: context.repo.repo, tag })).data;
-            } catch (cause) {
-              if (!notFound(cause)) throw cause;
-            }
+            const matchingReleases = (await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            })).filter((candidate) => candidate.tag_name === tag);
+            if (matchingReleases.length > 1) throw new Error(`Multiple GitHub releases use ${tag}; recovery fails closed.`);
+            let release = matchingReleases[0];
             if (!release) {
               release = (await github.rest.repos.createRelease({
                 owner: context.repo.owner,
@@ -1036,7 +1039,14 @@ jobs:
             const prereleaseText = process.env.EXPECTED_PRERELEASE || "";
             if (!/^(?:true|false)$/.test(prereleaseText)) throw new Error("Transport prerelease state is malformed.");
             const prerelease = prereleaseText === "true";
-            const release = (await github.rest.repos.getReleaseByTag({ owner: context.repo.owner, repo: context.repo.repo, tag })).data;
+            const matchingReleases = (await github.paginate(github.rest.repos.listReleases, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100,
+            })).filter((candidate) => candidate.tag_name === tag);
+            if (matchingReleases.length > 1) throw new Error(`Multiple GitHub releases use ${tag}; recovery fails closed.`);
+            const release = matchingReleases[0];
+            if (!release) throw new Error(`GitHub release ${tag} is missing after exact package verification.`);
             if (release.draft) {
               await github.rest.repos.updateRelease({
                 owner: context.repo.owner,

@@ -159,11 +159,15 @@ function expectReadOnlyWorkflowPermissions(permissions: string): void {
   expect(permissions).not.toMatch(/:\s*write(?:\s|$)/u);
 }
 
-function inlineNodeStepSource(workflow: string, stepName: string): string {
+function workflowStep(workflow: string, stepName: string): string {
   const stepStart = workflow.indexOf(`      - name: ${stepName}`);
   if (stepStart < 0) throw new Error(`Workflow step not found: ${stepName}`);
   const nextStep = workflow.indexOf("\n      - name:", stepStart + 1);
-  const block = workflow.slice(stepStart, nextStep < 0 ? undefined : nextStep);
+  return workflow.slice(stepStart, nextStep < 0 ? undefined : nextStep);
+}
+
+function inlineNodeStepSource(workflow: string, stepName: string): string {
+  const block = workflowStep(workflow, stepName);
   const marker = "          node <<'NODE'\n";
   const sourceStart = block.indexOf(marker);
   const sourceEnd = block.indexOf("\n          NODE", sourceStart + marker.length);
@@ -596,6 +600,21 @@ describe("release workflow policy", () => {
     expect(prereleaseClassifiers).toHaveLength(2);
     for (const classifier of prereleaseClassifiers) {
       expect(classifier).toContain("[0-9A-Za-z.-]*)\\.[0-9]+$/);");
+    }
+  });
+
+  it("discovers draft releases through the authenticated release listing", () => {
+    for (const stepName of [
+      "Preflight complete GitHub release state before mutation",
+      "Reconcile exact release tag",
+      "Create or reconcile draft GitHub release",
+      "Publish GitHub release",
+    ]) {
+      const step = workflowStep(cd, stepName);
+      expect(step).toContain("github.rest.repos.listReleases");
+      expect(step).not.toContain("github.rest.repos.getReleaseByTag");
+      expect(step).toContain("candidate.tag_name === tag");
+      expect(step).toContain("matchingReleases.length > 1");
     }
   });
 

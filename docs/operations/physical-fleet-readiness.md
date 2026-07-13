@@ -128,7 +128,8 @@ The second run has two deliberately separated stages:
    exact one-SBOM asset closure before any mutation. It derives prerelease and
    dist-tag state from the transported version, not the retry input. For a new
    version only, it then attests; for both publication and recovery it
-   reconciles the tag and draft release, publishes or verifies the exact
+   discovers drafts through the authenticated complete release listing,
+   reconciles the tag and exact release, and publishes or verifies the exact
    tarball with scripts disabled and provenance enabled, verifies registry
    integrity/provenance/signatures, and publishes the GitHub release. Unexpected
    assets are removed from drafts and cause published-release recovery to fail

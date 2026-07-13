@@ -22,6 +22,9 @@ not manually create a versioned release section.
   - Interrupted published-version recovery now separates the current
     protected-main validation commit from the immutable npm-provenance release
     commit, rebuilding the original source and preserving its tag identity.
+  - Draft release recovery now discovers authenticated draft and published
+    releases through the complete release listing instead of the published-only
+    tag lookup, preventing duplicate-release creation attempts.
 
 - **Security**
   - Release transport schema v2 binds both validation and release commits,
