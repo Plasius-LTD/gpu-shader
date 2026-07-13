@@ -20,7 +20,7 @@ export const SUPPORTED_STABLE_WEBGPU_MATRIX_POLICIES = [
   Object.freeze({
     matrixId: "stable-webgpu",
     matrixVersion: "2026-07-13",
-    matrixSha256: "9b47ff8162b055d49e38c4fe90b9074992ab8c9e1125926e936f8122e6119fd8",
+    matrixSha256: "4620eca44fd03004ee7650cfe9fcf42934493611a5097da5525f71578980b016",
   }),
 ] as const satisfies readonly {
   readonly matrixId: string;

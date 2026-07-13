@@ -16,6 +16,11 @@ not manually create a versioned release section.
   - (placeholder)
 
 - **Fixed**
+  - Canonicalized the shipped stable-WebGPU matrix and corrected its supported
+    policy digest so the exact artifact accepted by qualification is also
+    admissible at canonical JSON boundaries. The policy-identity change
+    requires complete shader-inventory requalification and does not itself
+    claim any shader passed the physical matrix.
   - Post-publication npm install and signature verification retry for a bounded
     interval so registry-edge propagation cannot strand an otherwise verified
     immutable release; every retry still requires signatures to pass.

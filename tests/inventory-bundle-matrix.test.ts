@@ -11,6 +11,7 @@ import {
   SUPPORTED_ADDITIVE_WEBGPU_MATRIX_POLICIES,
   SUPPORTED_STABLE_WEBGPU_MATRIX_POLICIES,
 } from "../src/contracts.js";
+import { canonicalizeGpuContract } from "../src/canonical-json.js";
 import { computeSha256 } from "../src/hash.js";
 import { validateCompileUnitInventory } from "../src/testing/inventory.js";
 import { validateStableWebGpuMatrix } from "../src/testing/matrix.js";
@@ -241,6 +242,7 @@ describe("stable WebGPU support matrix", () => {
     const policy = SUPPORTED_STABLE_WEBGPU_MATRIX_POLICIES[0];
     const result = validateStableWebGpuMatrix(matrix);
     expect(result.ok).toBe(true);
+    expect(new TextDecoder().decode(matrixBytes)).toBe(canonicalizeGpuContract(matrix));
     expect({
       matrixId: matrix.matrixId,
       matrixVersion: matrix.version,
@@ -262,7 +264,7 @@ describe("stable WebGPU support matrix", () => {
     expect(() => { policies[0]!.matrixSha256 = ZERO_SHA; }).toThrow(TypeError);
     expect(() => { policies.push({ matrixId: "forged", matrixVersion: "1", matrixSha256: ZERO_SHA }); }).toThrow(TypeError);
     expect(SUPPORTED_STABLE_WEBGPU_MATRIX_POLICIES[0]!.matrixSha256).toBe(
-      "9b47ff8162b055d49e38c4fe90b9074992ab8c9e1125926e936f8122e6119fd8",
+      "4620eca44fd03004ee7650cfe9fcf42934493611a5097da5525f71578980b016",
     );
   });
 

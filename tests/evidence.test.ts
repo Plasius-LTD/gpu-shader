@@ -101,17 +101,19 @@ describe("trusted qualification preflight", () => {
     });
   });
 
-  it("binds the exact pretty-printed matrix artifact instead of a canonical reserialization", async () => {
+  it("binds the exact canonical matrix artifact instead of a pretty reserialization", async () => {
     const { matrix, matrixBytes } = await stableMatrixArtifact();
     const canonicalBytes = new TextEncoder().encode(canonicalizeGpuContract(matrix));
+    const reserializedBytes = new TextEncoder().encode(`${JSON.stringify(matrix, null, 2)}\n`);
     const matrixSha256 = await computeSha256(matrixBytes);
-    expect(await computeSha256(canonicalBytes)).not.toBe(matrixSha256);
+    expect(await computeSha256(canonicalBytes)).toBe(matrixSha256);
+    expect(await computeSha256(reserializedBytes)).not.toBe(matrixSha256);
 
     await expect(createQualificationPreflight({
       qualificationId: "qualification.matrix-bytes",
       bundle: await qualificationBundle(matrix),
       matrix,
-      matrixBytes: canonicalBytes,
+      matrixBytes: reserializedBytes,
       sourceUri: "https://account.blob.core.windows.net/candidates/shader.tar?versionid=immutable-one",
       dataBundleSha256: TWO_SHA,
       matrixSha256,
@@ -123,7 +125,7 @@ describe("trusted qualification preflight", () => {
     await expect(aggregateShaderValidationEvidence({
       bundle: scenario.bundle,
       matrix,
-      matrixBytes: canonicalBytes,
+      matrixBytes: reserializedBytes,
       preflight: scenario.preflightArtifact,
       cellEvidence: scenario.cellEvidence,
       runnerPreflights: scenario.runnerPreflights,
@@ -149,7 +151,7 @@ describe("trusted qualification preflight", () => {
       evidence,
       bundle: scenario.bundle,
       matrix,
-      matrixBytes: canonicalBytes,
+      matrixBytes: reserializedBytes,
     });
     expect(final.ok).toBe(false);
     if (!final.ok) expect(final.diagnostics[0]?.message).toMatch(/matrix.*(?:artifact|digest|bytes)/u);

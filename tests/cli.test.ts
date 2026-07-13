@@ -45,7 +45,7 @@ describe("gpu-shader CLI routing", () => {
 
     const semanticClone = JSON.parse(await readFile(matrixPath, "utf8")) as unknown;
     const reserializedMatrix = await jsonFile(semanticClone);
-    await writeFile(reserializedMatrix, JSON.stringify(semanticClone), "utf8");
+    await writeFile(reserializedMatrix, `${JSON.stringify(semanticClone, null, 2)}\n`, "utf8");
     await expect(runCli(["node", "cli", "validate-matrix", "--matrix", reserializedMatrix]))
       .rejects.toThrow(/Matrix bytes do not match/u);
     await expect(runCli(["node", "cli", "unknown"])).rejects.toThrow(/Usage/u);
