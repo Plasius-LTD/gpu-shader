@@ -16,7 +16,9 @@ not manually create a versioned release section.
   - (placeholder)
 
 - **Fixed**
-  - (placeholder)
+  - Post-publication npm install and signature verification retry for a bounded
+    interval so registry-edge propagation cannot strand an otherwise verified
+    immutable release; every retry still requires signatures to pass.
 
 - **Security**
   - (placeholder)
