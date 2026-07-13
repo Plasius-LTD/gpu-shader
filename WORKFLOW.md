@@ -43,8 +43,12 @@ For each Story or Task contained in the Feature:
 4. If the work is merge/release-bearing on `main`, verify the relevant `cd.yml` path for each affected repository.
 5. For production releases on `main`, confirm deployment used `.github/workflows/cd.yml` with the GitHub `production` environment.
 6. For package releases, verify npm version/provenance and the GitHub release
-   tag point to the prepared `main` commit; verify the public tarball with the
-   same package-content policy used before publication.
+   tag point to the immutable release-source commit; verify the public tarball
+   with the same package-content policy used before publication. A new
+   publication requires that commit to equal the protected-main validation
+   commit. Interrupted published-version recovery may use a newer validation
+   commit only when npm provenance, the existing tag, and branch ancestry all
+   resolve the original release commit.
 7. Only then mark the work complete.
 
 ## 7. Completion Gates

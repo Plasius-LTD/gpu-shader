@@ -123,7 +123,11 @@
 - Production releases must be executed only through `.github/workflows/cd.yml` on `main` using the GitHub `production` environment.
 - Required package post-release validation: confirm `cd.yml` succeeded from
   `main` through the `production` environment, the npm version and provenance
-  match the prepared commit, and the GitHub release/tag identifies that commit.
+  match the immutable release-source commit, and the GitHub release/tag
+  identifies that commit. For new publication it must equal the protected-main
+  validation commit; interrupted published-version recovery may differ only
+  when exact npm provenance, the existing tag, and protected-main ancestry all
+  agree.
 - CI must be verified after push for tracked implementation work.
 - `cd.yml` verification is required only when the change is merge/release-bearing on `main`.
 - Do not mark merge/release-bearing work complete until the relevant CI and CD gates have succeeded.

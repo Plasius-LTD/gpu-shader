@@ -50,38 +50,48 @@ jobs:
       artifact_digest: ${{ steps.upload.outputs.artifact-digest }}
       artifact_name: ${{ steps.artifact.outputs.name }}
     steps:
-      - name: Checkout exact prepared release commit
+      - name: Checkout immutable release source commit
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          ref: ${{ needs.prepare_release.outputs.commit_sha }}
+          ref: ${{ needs.prepare_release.outputs.release_commit_sha }}
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Require dispatch SHA to equal prepared release commit
+      - name: Require exact validation and release commit authorities
         env:
-          PREPARED_SHA: ${{ needs.prepare_release.outputs.commit_sha }}
+          VALIDATION_SHA: ${{ needs.prepare_release.outputs.validation_commit_sha }}
+          RELEASE_SHA: ${{ needs.prepare_release.outputs.release_commit_sha }}
+          PREPARED_PUBLISHED: ${{ needs.prepare_release.outputs.published }}
         run: |
           set -euo pipefail
-          if ! [[ "${GITHUB_SHA}" =~ ^[a-f0-9]{40}$ ]] || ! [[ "${PREPARED_SHA}" =~ ^[a-f0-9]{40}$ ]]; then
+          if ! [[ "${GITHUB_SHA}" =~ ^[a-f0-9]{40}$ ]] || ! [[ "${VALIDATION_SHA}" =~ ^[a-f0-9]{40}$ ]] || ! [[ "${RELEASE_SHA}" =~ ^[a-f0-9]{40}$ ]] || ! [[ "${PREPARED_PUBLISHED}" =~ ^(true|false)$ ]]; then
             echo "Release SHAs must be exact lowercase SHA-1 values." >&2
             exit 1
           fi
-          if [ "${GITHUB_SHA}" != "${PREPARED_SHA}" ]; then
-            echo "Release preparation changed protected main from ${GITHUB_SHA} to ${PREPARED_SHA}." >&2
+          if [ "${GITHUB_SHA}" != "${VALIDATION_SHA}" ]; then
+            echo "Release preparation changed protected main from ${GITHUB_SHA} to ${VALIDATION_SHA}." >&2
             echo "This run cannot publish because npm provenance would identify the dispatch SHA." >&2
-            echo "Wait for CI on ${PREPARED_SHA}, then dispatch cd.yml from main with bump=none." >&2
+            echo "Wait for CI on ${VALIDATION_SHA}, then dispatch cd.yml from main with bump=none." >&2
+            exit 1
+          fi
+          if [ "${PREPARED_PUBLISHED}" != "true" ] && [ "${VALIDATION_SHA}" != "${RELEASE_SHA}" ]; then
+            echo "An unpublished release cannot use different validation and release commits." >&2
             exit 1
           fi
           ACTUAL_SHA="$(git rev-parse HEAD)"
-          if [ "${ACTUAL_SHA}" != "${PREPARED_SHA}" ]; then
-            echo "Prepared checkout is ${ACTUAL_SHA}, expected ${PREPARED_SHA}." >&2
+          if [ "${ACTUAL_SHA}" != "${RELEASE_SHA}" ]; then
+            echo "Release-source checkout is ${ACTUAL_SHA}, expected ${RELEASE_SHA}." >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${RELEASE_SHA}" "${VALIDATION_SHA}"; then
+            echo "Release commit ${RELEASE_SHA} is not an ancestor of validation commit ${VALIDATION_SHA}." >&2
             exit 1
           fi
 
-      - name: Wait for successful CI on exact prepared commit
+      - name: Wait for successful CI on exact validation commit
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
-          EXPECTED_SHA: ${{ needs.prepare_release.outputs.commit_sha }}
+          EXPECTED_SHA: ${{ needs.prepare_release.outputs.validation_commit_sha }}
           EXPECTED_BRANCH: main
           CI_WAIT_SECONDS: "2400"
         with:
@@ -90,7 +100,7 @@ jobs:
             const expectedBranch = process.env.EXPECTED_BRANCH || "";
             const waitSeconds = Number(process.env.CI_WAIT_SECONDS || "0");
             if (!/^[a-f0-9]{40}$/.test(expectedSha)) {
-              throw new Error("Prepared commit SHA must be an exact lowercase SHA-1.");
+              throw new Error("Validation commit SHA must be an exact lowercase SHA-1.");
             }
             if (expectedBranch !== "main") {
               throw new Error("Package publication is restricted to main.");
@@ -143,7 +153,7 @@ jobs:
       - name: Use Node.js 24
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version-file: ".nvmrc"
+          node-version: "24.13.0"
           cache: npm
 
       - name: Install dependencies
@@ -206,13 +216,57 @@ jobs:
           EXPECTED_PACKAGE_VERSION: ${{ needs.prepare_release.outputs.version }}
         run: node scripts/prepare-npm-release.cjs release-artifacts
 
-      - name: Generate SBOM (CycloneDX)
-        run: npm sbom --sbom-format=cyclonedx --sbom-type=library --omit dev > release-artifacts/sbom.cdx.json
+      - name: Generate reproducible SBOM (CycloneDX)
+        env:
+          EXPECTED_RELEASE_COMMIT: ${{ needs.prepare_release.outputs.release_commit_sha }}
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH="$(git show -s --format=%ct "${EXPECTED_RELEASE_COMMIT}")"
+          RAW_SBOM="${RUNNER_TEMP}/gpu-shader-sbom.raw.json"
+          export RAW_SBOM
+          npm sbom --sbom-format=cyclonedx --sbom-type=library --omit dev > "${RAW_SBOM}"
+          node <<'NODE'
+          const crypto = require("node:crypto");
+          const fs = require("node:fs");
+
+          const fail = (message) => { throw new Error(message); };
+          const releaseCommit = process.env.EXPECTED_RELEASE_COMMIT || "";
+          const sourceDateEpoch = Number(process.env.SOURCE_DATE_EPOCH || "");
+          const rawPath = process.env.RAW_SBOM || "";
+          if (!/^[a-f0-9]{40}$/.test(releaseCommit)) fail("Release commit is malformed.");
+          if (!Number.isSafeInteger(sourceDateEpoch) || sourceDateEpoch < 1_000_000_000 || sourceDateEpoch > 4_102_444_800) fail("Release commit timestamp is outside the approved range.");
+          const rawStat = fs.lstatSync(rawPath);
+          if (!rawStat.isFile() || rawStat.isSymbolicLink() || rawStat.size <= 0 || rawStat.size > 10 * 1024 * 1024) fail("Raw SBOM is not a bounded regular file.");
+          const document = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(fs.readFileSync(rawPath)));
+          if (!document || typeof document !== "object" || Array.isArray(document) || !document.metadata || typeof document.metadata !== "object" || Array.isArray(document.metadata)) fail("Raw SBOM document is malformed.");
+
+          delete document.serialNumber;
+          delete document.metadata.timestamp;
+          const canonicalize = (value) => {
+            if (Array.isArray(value)) return value.map(canonicalize);
+            if (!value || typeof value !== "object") return value;
+            return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalize(value[key])]));
+          };
+          const stableBody = JSON.stringify(canonicalize(document));
+          const uuidBytes = Buffer.from(
+            crypto.createHash("sha256").update("plasius-npm-sbom-v1\0").update(releaseCommit).update("\0").update(stableBody).digest().subarray(0, 16),
+          );
+          uuidBytes[6] = (uuidBytes[6] & 0x0f) | 0x50;
+          uuidBytes[8] = (uuidBytes[8] & 0x3f) | 0x80;
+          const uuidHex = uuidBytes.toString("hex");
+          document.serialNumber = `urn:uuid:${uuidHex.slice(0, 8)}-${uuidHex.slice(8, 12)}-${uuidHex.slice(12, 16)}-${uuidHex.slice(16, 20)}-${uuidHex.slice(20)}`;
+          document.metadata.timestamp = new Date(sourceDateEpoch * 1000).toISOString();
+
+          const normalized = `${JSON.stringify(canonicalize(document), null, 2)}\n`;
+          fs.writeFileSync("release-artifacts/sbom.cdx.json", normalized, { flag: "wx", mode: 0o600 });
+          fs.rmSync(rawPath);
+          NODE
 
       - name: Bind exact release transport manifest
         env:
           EXPECTED_REPOSITORY: ${{ github.repository }}
-          EXPECTED_COMMIT: ${{ needs.prepare_release.outputs.commit_sha }}
+          EXPECTED_VALIDATION_COMMIT: ${{ needs.prepare_release.outputs.validation_commit_sha }}
+          EXPECTED_RELEASE_COMMIT: ${{ needs.prepare_release.outputs.release_commit_sha }}
           EXPECTED_PACKAGE_NAME: ${{ needs.prepare_release.outputs.name }}
           EXPECTED_PACKAGE_VERSION: ${{ needs.prepare_release.outputs.version }}
           EXPECTED_TAG: ${{ needs.prepare_release.outputs.tag }}
@@ -233,12 +287,13 @@ jobs:
           const fail = (message) => { throw new Error(message); };
           const env = process.env;
           if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(env.EXPECTED_REPOSITORY || "")) fail("Repository is malformed.");
-          if (!/^[a-f0-9]{40}$/.test(env.EXPECTED_COMMIT || "")) fail("Commit is malformed.");
+          if (!/^[a-f0-9]{40}$/.test(env.EXPECTED_VALIDATION_COMMIT || "") || !/^[a-f0-9]{40}$/.test(env.EXPECTED_RELEASE_COMMIT || "")) fail("Release authority commit is malformed.");
           if (!/^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/.test(env.EXPECTED_PACKAGE_NAME || "")) fail("Package name is malformed.");
           if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/.test(env.EXPECTED_PACKAGE_VERSION || "")) fail("Package version is malformed.");
           if (env.EXPECTED_TAG !== `v${env.EXPECTED_PACKAGE_VERSION}`) fail("Release tag differs from the package version.");
           if (!/^(?:|--access public|--tag [0-9A-Za-z][0-9A-Za-z.-]*|--access public --tag [0-9A-Za-z][0-9A-Za-z.-]*)$/.test(env.EXPECTED_FLAGS || "")) fail("Publish flags are outside the allowlist.");
           if (!/^(?:true|false)$/.test(env.EXPECTED_PUBLISHED || "")) fail("Published state is malformed.");
+          if (env.EXPECTED_PUBLISHED !== "true" && env.EXPECTED_VALIDATION_COMMIT !== env.EXPECTED_RELEASE_COMMIT) fail("Unpublished transport authorities must identify the same commit.");
           if (!/^[1-9][0-9]*$/.test(env.EXPECTED_RUN_ID || "") || !/^[1-9][0-9]*$/.test(env.EXPECTED_RUN_ATTEMPT || "")) fail("Run identity is malformed.");
 
           const root = fs.realpathSync("release-artifacts");
@@ -271,10 +326,11 @@ jobs:
           if ((prerelease && (!prereleaseMatch || distTag !== expectedPrereleaseTag)) || (!prerelease && distTag !== "latest")) fail("Publish dist-tag conflicts with semantic-version prerelease state.");
 
           const transport = {
-            schemaVersion: 1,
+            schemaVersion: 2,
             repository: env.EXPECTED_REPOSITORY,
             workflow: ".github/workflows/cd.yml",
-            commitSha: env.EXPECTED_COMMIT,
+            validationCommitSha: env.EXPECTED_VALIDATION_COMMIT,
+            releaseCommitSha: env.EXPECTED_RELEASE_COMMIT,
             run: { id: env.EXPECTED_RUN_ID, attempt: env.EXPECTED_RUN_ATTEMPT },
             package: {
               name: env.EXPECTED_PACKAGE_NAME,
@@ -347,22 +403,22 @@ jobs:
           EXPECTED_ARTIFACT_NAME: npm-release-${{ github.run_id }}-attempt-${{ github.run_attempt }}
           VALIDATED_ARTIFACT_NAME: ${{ needs.validate_and_pack.outputs.artifact_name }}
           EXPECTED_ARTIFACT_DIGEST: ${{ needs.validate_and_pack.outputs.artifact_digest }}
-          EXPECTED_COMMIT: ${{ needs.prepare_release.outputs.commit_sha }}
+          EXPECTED_VALIDATION_COMMIT: ${{ needs.prepare_release.outputs.validation_commit_sha }}
         with:
           script: |
             const artifactIdText = process.env.EXPECTED_ARTIFACT_ID || "";
             const artifactName = process.env.EXPECTED_ARTIFACT_NAME || "";
             const validatedArtifactName = process.env.VALIDATED_ARTIFACT_NAME || "";
             const artifactDigest = process.env.EXPECTED_ARTIFACT_DIGEST || "";
-            const expectedCommit = process.env.EXPECTED_COMMIT || "";
+            const expectedValidationCommit = process.env.EXPECTED_VALIDATION_COMMIT || "";
             if (!/^[1-9][0-9]*$/.test(artifactIdText)) throw new Error("Artifact ID is malformed.");
             if (artifactName !== `npm-release-${context.runId}-attempt-${process.env.GITHUB_RUN_ATTEMPT}` || validatedArtifactName !== artifactName) throw new Error("Artifact name is not attempt-scoped to this run.");
             if (!/^[a-f0-9]{64}$/.test(artifactDigest)) throw new Error("Artifact digest is malformed.");
-            if (!/^[a-f0-9]{40}$/.test(expectedCommit)) throw new Error("Prepared commit is malformed.");
+            if (!/^[a-f0-9]{40}$/.test(expectedValidationCommit)) throw new Error("Validation commit is malformed.");
 
             const artifactId = Number(artifactIdText);
             if (!Number.isSafeInteger(artifactId)) throw new Error("Artifact ID is outside the safe integer range.");
-            if (context.sha !== expectedCommit) throw new Error("Publish context is not the exact prepared commit.");
+            if (context.sha !== expectedValidationCommit) throw new Error("Publish context is not the exact validation commit.");
             const artifacts = await github.paginate(github.rest.actions.listWorkflowRunArtifacts, {
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -394,7 +450,8 @@ jobs:
         env:
           RELEASE_BUNDLE: ${{ steps.download.outputs.download-path }}
           EXPECTED_REPOSITORY: ${{ github.repository }}
-          EXPECTED_COMMIT: ${{ needs.prepare_release.outputs.commit_sha }}
+          EXPECTED_VALIDATION_COMMIT: ${{ needs.prepare_release.outputs.validation_commit_sha }}
+          EXPECTED_RELEASE_COMMIT: ${{ needs.prepare_release.outputs.release_commit_sha }}
           EXPECTED_PACKAGE_NAME: ${{ needs.prepare_release.outputs.name }}
           EXPECTED_PACKAGE_VERSION: ${{ needs.prepare_release.outputs.version }}
           EXPECTED_TAG: ${{ needs.prepare_release.outputs.tag }}
@@ -429,14 +486,16 @@ jobs:
           const transportBytes = fs.readFileSync(path.join(root, transportName));
           if (transportBytes.length <= 0 || transportBytes.length > 64 * 1024) fail("Transport manifest is outside its size bound.");
           const transport = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(transportBytes));
-          exactKeys(transport, ["schemaVersion", "repository", "workflow", "commitSha", "run", "package", "tarball", "sbom"], "Transport manifest");
+          exactKeys(transport, ["schemaVersion", "repository", "workflow", "validationCommitSha", "releaseCommitSha", "run", "package", "tarball", "sbom"], "Transport manifest");
           exactKeys(transport.run, ["id", "attempt"], "Run identity");
           exactKeys(transport.package, ["name", "version", "tag", "publishFlags", "preparedPublished", "prerelease", "distTag"], "Package identity");
           exactKeys(transport.tarball, ["fileName", "size", "sha1", "sha256", "sha512", "integrity"], "Tarball record");
           exactKeys(transport.sbom, ["fileName", "size", "sha256"], "SBOM record");
-          if (transport.schemaVersion !== 1 || transport.repository !== process.env.EXPECTED_REPOSITORY || transport.workflow !== ".github/workflows/cd.yml" || transport.commitSha !== process.env.EXPECTED_COMMIT) fail("Transport authority differs from this release.");
+          if (transport.schemaVersion !== 2 || transport.repository !== process.env.EXPECTED_REPOSITORY || transport.workflow !== ".github/workflows/cd.yml" || transport.validationCommitSha !== process.env.EXPECTED_VALIDATION_COMMIT || transport.releaseCommitSha !== process.env.EXPECTED_RELEASE_COMMIT) fail("Transport authority differs from this release.");
+          if (!/^[a-f0-9]{40}$/.test(transport.validationCommitSha) || !/^[a-f0-9]{40}$/.test(transport.releaseCommitSha)) fail("Transport authority commit is malformed.");
           if (transport.run.id !== process.env.EXPECTED_RUN_ID || transport.run.attempt !== process.env.EXPECTED_RUN_ATTEMPT) fail("Transport run identity differs from this attempt.");
           if (transport.package.name !== process.env.EXPECTED_PACKAGE_NAME || transport.package.version !== process.env.EXPECTED_PACKAGE_VERSION || transport.package.tag !== process.env.EXPECTED_TAG || transport.package.publishFlags !== (process.env.EXPECTED_FLAGS || "") || transport.package.preparedPublished !== (process.env.EXPECTED_PUBLISHED === "true")) fail("Transport package identity differs from release preparation.");
+          if (!transport.package.preparedPublished && transport.validationCommitSha !== transport.releaseCommitSha) fail("Unpublished transport authorities must identify the same commit.");
           if (!/^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/.test(transport.package.name) || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/.test(transport.package.version) || transport.package.tag !== `v${transport.package.version}`) fail("Transport package fields are malformed.");
           if (!/^(?:|--access public|--tag [0-9A-Za-z][0-9A-Za-z.-]*|--access public --tag [0-9A-Za-z][0-9A-Za-z.-]*)$/.test(transport.package.publishFlags)) fail("Transport publish flags are outside the allowlist.");
           const expectedPrerelease = transport.package.version.includes("-");
@@ -469,6 +528,8 @@ jobs:
             release_tag: transport.package.tag,
             flags: transport.package.publishFlags,
             prepared_published: String(transport.package.preparedPublished),
+            validation_commit_sha: transport.validationCommitSha,
+            release_commit_sha: transport.releaseCommitSha,
             prerelease: String(transport.package.prerelease),
             dist_tag: transport.package.distTag,
             integrity: transport.tarball.integrity,
@@ -489,9 +550,19 @@ jobs:
           PACKAGE_VERSION: ${{ steps.release.outputs.release_version }}
           EXPECTED_INTEGRITY: ${{ steps.release.outputs.integrity }}
           PREPARED_PUBLISHED: ${{ steps.release.outputs.prepared_published }}
+          VALIDATION_COMMIT_SHA: ${{ steps.release.outputs.validation_commit_sha }}
+          RELEASE_COMMIT_SHA: ${{ steps.release.outputs.release_commit_sha }}
           NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-preflight-cache
         run: |
           set -euo pipefail
+          if ! [[ "${VALIDATION_COMMIT_SHA}" =~ ^[a-f0-9]{40}$ ]] || ! [[ "${RELEASE_COMMIT_SHA}" =~ ^[a-f0-9]{40}$ ]] || ! [[ "${PREPARED_PUBLISHED}" =~ ^(true|false)$ ]]; then
+            echo "Live npm preflight authority is malformed." >&2
+            exit 1
+          fi
+          if [ "${VALIDATION_COMMIT_SHA}" != "${RELEASE_COMMIT_SHA}" ] && [ "${PREPARED_PUBLISHED}" != "true" ]; then
+            echo "Split release authorities require an already-published exact npm version." >&2
+            exit 1
+          fi
           QUERY_ERROR="${RUNNER_TEMP}/npm-preflight-exact.err"
           set +e
           LIVE_INTEGRITY="$(npm view "${PACKAGE_NAME}@${PACKAGE_VERSION}" dist.integrity --registry https://registry.npmjs.org 2>"${QUERY_ERROR}")"
@@ -533,13 +604,17 @@ jobs:
             echo "Release preparation observed an immutable npm version that is now absent; version reuse is forbidden." >&2
             exit 1
           fi
+          if [ "${VALIDATION_COMMIT_SHA}" != "${RELEASE_COMMIT_SHA}" ]; then
+            echo "Live npm is absent, so split validation/release commits are forbidden." >&2
+            exit 1
+          fi
           echo "published=false" >> "${GITHUB_OUTPUT}"
 
       - name: Preflight complete GitHub release state before mutation
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           EXPECTED_TAG: ${{ steps.release.outputs.release_tag }}
-          EXPECTED_SHA: ${{ needs.prepare_release.outputs.commit_sha }}
+          EXPECTED_SHA: ${{ needs.prepare_release.outputs.release_commit_sha }}
           EXPECTED_SBOM_SHA256: ${{ steps.release.outputs.sbom_sha256 }}
           EXPECTED_PRERELEASE: ${{ steps.release.outputs.prerelease }}
           REGISTRY_PUBLISHED: ${{ steps.registry.outputs.published }}
@@ -590,11 +665,13 @@ jobs:
             core.info(`Preflight accepted npm=${registryPublished ? "published" : "absent"}, tag=${tagTarget || "missing"}, release=${release ? (release.draft ? "draft" : "published") : "missing"}.`);
 
       - name: Attest exact npm tarball
+        if: steps.registry.outputs.published != 'true'
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: ${{ steps.release.outputs.tarball_path }}
 
       - name: Attest exact SBOM
+        if: steps.registry.outputs.published != 'true'
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
         with:
           subject-path: ${{ steps.release.outputs.sbom_path }}
@@ -603,7 +680,7 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           EXPECTED_TAG: ${{ steps.release.outputs.release_tag }}
-          EXPECTED_SHA: ${{ needs.prepare_release.outputs.commit_sha }}
+          EXPECTED_SHA: ${{ needs.prepare_release.outputs.release_commit_sha }}
           REGISTRY_PUBLISHED: ${{ steps.registry.outputs.published }}
         with:
           script: |
@@ -653,7 +730,7 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           EXPECTED_TAG: ${{ steps.release.outputs.release_tag }}
-          EXPECTED_SHA: ${{ needs.prepare_release.outputs.commit_sha }}
+          EXPECTED_SHA: ${{ needs.prepare_release.outputs.release_commit_sha }}
           EXPECTED_SBOM_PATH: ${{ steps.release.outputs.sbom_path }}
           EXPECTED_SBOM_SHA256: ${{ steps.release.outputs.sbom_sha256 }}
           EXPECTED_PRERELEASE: ${{ steps.release.outputs.prerelease }}
@@ -798,18 +875,19 @@ jobs:
           PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
           PACKAGE_VERSION: ${{ steps.release.outputs.release_version }}
           EXPECTED_INTEGRITY: ${{ steps.release.outputs.integrity }}
-          EXPECTED_COMMIT: ${{ needs.prepare_release.outputs.commit_sha }}
+          EXPECTED_RELEASE_COMMIT: ${{ needs.prepare_release.outputs.release_commit_sha }}
           EXPECTED_REPOSITORY: ${{ github.repository }}
         run: |
           node --input-type=module <<'NODE'
           const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
           const predicateType = "https://slsa.dev/provenance/v1";
           const builder = "https://github.com/actions/runner/github-hosted";
+          const requestTimeoutMs = 10_000;
           const expected = {
             name: process.env.PACKAGE_NAME,
             version: process.env.PACKAGE_VERSION,
             integrity: process.env.EXPECTED_INTEGRITY,
-            commit: process.env.EXPECTED_COMMIT,
+            commit: process.env.EXPECTED_RELEASE_COMMIT,
             repository: process.env.EXPECTED_REPOSITORY,
           };
           if (!/^@[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*$/.test(expected.name || "") || !/^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?$/.test(expected.version || "") || !/^sha512-[A-Za-z0-9+/]+={0,2}$/.test(expected.integrity || "") || !/^[a-f0-9]{40}$/.test(expected.commit || "") || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(expected.repository || "")) throw new Error("Registry verification inputs are malformed.");
@@ -817,8 +895,10 @@ jobs:
           if (integrityBytes.length !== 64) throw new Error("Expected integrity is not SHA-512.");
 
           async function fetchJson(url) {
-            const response = await fetch(url, { headers: { accept: "application/json", "user-agent": "plasius-gpu-shader-release-verifier" }, redirect: "error" });
+            const response = await fetch(url, { headers: { accept: "application/json", "user-agent": "plasius-gpu-shader-release-verifier" }, redirect: "error", signal: AbortSignal.timeout(requestTimeoutMs) });
             if (!response.ok || !response.body) throw new Error(`Registry request failed with HTTP ${response.status}.`);
+            const contentLength = Number(response.headers.get("content-length") || "0");
+            if (Number.isFinite(contentLength) && contentLength > 10_000_000) throw new Error("Registry response exceeds its size bound.");
             const chunks = [];
             let received = 0;
             for await (const chunk of response.body) {
@@ -839,25 +919,42 @@ jobs:
             if (metadata.name !== expected.name || metadata.version !== expected.version || metadata.dist?.integrity !== expected.integrity) throw new Error("Registry identity or integrity differs from the validated package.");
             const rawAttestationsUrl = metadata.dist?.attestations?.url;
             if (typeof rawAttestationsUrl !== "string" || rawAttestationsUrl.length === 0) throw new Error("Registry provenance is not available yet.");
-            const attestationsUrl = new URL(rawAttestationsUrl);
+            let attestationsUrl;
+            try {
+              attestationsUrl = new URL(rawAttestationsUrl);
+            } catch (cause) {
+              throw new Error("Registry attestation URL is untrusted.", { cause });
+            }
             const expectedPath = `/-/npm/v1/attestations/${expected.name}@${expected.version}`;
-            if (attestationsUrl.protocol !== "https:" || attestationsUrl.hostname !== "registry.npmjs.org" || decodeURIComponent(attestationsUrl.pathname) !== expectedPath) throw new Error("Registry attestation URL is untrusted.");
+            let decodedPath;
+            try {
+              decodedPath = decodeURIComponent(attestationsUrl.pathname);
+            } catch (cause) {
+              throw new Error("Registry attestation URL is untrusted.", { cause });
+            }
+            if (attestationsUrl.protocol !== "https:" || attestationsUrl.hostname !== "registry.npmjs.org" || attestationsUrl.port !== "" || attestationsUrl.username !== "" || attestationsUrl.password !== "" || attestationsUrl.search !== "" || attestationsUrl.hash !== "" || decodedPath !== expectedPath) throw new Error("Registry attestation URL is untrusted.");
             const document = await fetchJson(attestationsUrl);
             const attestations = document?.attestations;
             if (!Array.isArray(attestations) || attestations.length === 0 || attestations.length > 16) throw new Error("Registry returned no bounded attestation set.");
-            const statement = payload(attestations.find((entry) => entry?.predicateType === predicateType));
-            if (statement.predicateType !== predicateType) throw new Error("Provenance predicate type differs from its envelope.");
+            const provenances = attestations.filter((entry) => entry?.predicateType === predicateType);
+            if (provenances.length !== 1) throw new Error("Registry must return exactly one SLSA provenance attestation.");
+            const statement = payload(provenances[0]);
+            if (statement?._type !== "https://in-toto.io/Statement/v1" || statement.predicateType !== predicateType) throw new Error("Provenance predicate type differs from its envelope.");
             const subjectName = `pkg:npm/${expected.name.replace(/^@/, "%40")}@${expected.version}`;
-            const subject = Array.isArray(statement.subject) ? statement.subject.find((entry) => entry?.name === subjectName) : undefined;
-            if (subject?.digest?.sha512 !== integrityBytes.toString("hex")) throw new Error("Provenance subject does not bind the validated tarball.");
+            const subjects = Array.isArray(statement.subject) && statement.subject.length === 1 ? statement.subject.filter((entry) => entry?.name === subjectName) : [];
+            if (subjects.length !== 1 || subjects[0]?.digest?.sha512 !== integrityBytes.toString("hex")) throw new Error("Provenance subject does not bind the validated tarball.");
             const predicate = statement.predicate;
             const workflow = predicate?.buildDefinition?.externalParameters?.workflow;
             if (workflow?.repository !== `https://github.com/${expected.repository}` || workflow?.path !== ".github/workflows/cd.yml" || workflow?.ref !== "refs/heads/main") throw new Error("Provenance is not bound to protected-main CD.");
-            const dependency = Array.isArray(predicate?.buildDefinition?.resolvedDependencies) ? predicate.buildDefinition.resolvedDependencies.find((entry) => entry?.digest?.gitCommit === expected.commit) : undefined;
-            if (!dependency || dependency.uri !== `git+https://github.com/${expected.repository}@refs/heads/main`) throw new Error("Provenance is not bound to the exact prepared commit.");
+            const dependencies = predicate?.buildDefinition?.resolvedDependencies;
+            const expectedDependencyUri = `git+https://github.com/${expected.repository}@refs/heads/main`;
+            const protectedMainDependencies = Array.isArray(dependencies) && dependencies.length <= 64 ? dependencies.filter((entry) => entry?.uri === expectedDependencyUri) : [];
+            if (protectedMainDependencies.length !== 1 || protectedMainDependencies[0]?.digest?.gitCommit !== expected.commit) throw new Error("Provenance is not bound to exactly one immutable release commit.");
             if (predicate?.runDetails?.builder?.id !== builder) throw new Error("Provenance was not produced by a GitHub-hosted runner.");
             const invocationId = predicate?.runDetails?.metadata?.invocationId;
-            if (typeof invocationId !== "string" || !invocationId.startsWith(`https://github.com/${expected.repository}/actions/runs/`)) throw new Error("Provenance invocation does not belong to this repository.");
+            const invocationPrefix = `https://github.com/${expected.repository}/actions/runs/`;
+            const invocationSuffix = typeof invocationId === "string" && invocationId.startsWith(invocationPrefix) ? invocationId.slice(invocationPrefix.length) : "";
+            if (!/^[1-9][0-9]*\/attempts\/[1-9][0-9]*$/.test(invocationSuffix)) throw new Error("Provenance invocation does not belong to this repository.");
             console.log(`Verified ${expected.name}@${expected.version} integrity and provenance: ${invocationId}`);
           }
           let lastError;
@@ -867,7 +964,7 @@ jobs:
               process.exit(0);
             } catch (cause) {
               lastError = cause;
-              if (attempt === 30 || /differs|not bound|malformed|untrusted/.test(String(cause?.message || cause))) break;
+              if (attempt === 30 || /differs|does not bind|not bound|malformed|untrusted|exactly one/.test(String(cause?.message || cause))) break;
               await delay(4000);
             }
           }
@@ -957,7 +1054,7 @@ jobs:
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
           EXPECTED_TAG: ${{ steps.release.outputs.release_tag }}
-          EXPECTED_SHA: ${{ needs.prepare_release.outputs.commit_sha }}
+          EXPECTED_SHA: ${{ needs.prepare_release.outputs.release_commit_sha }}
           EXPECTED_SBOM_SHA256: ${{ steps.release.outputs.sbom_sha256 }}
           EXPECTED_PRERELEASE: ${{ steps.release.outputs.prerelease }}
         with:
@@ -980,4 +1077,4 @@ jobs:
             const assets = await github.paginate(github.rest.repos.listReleaseAssets, { owner: context.repo.owner, repo: context.repo.repo, release_id: release.id, per_page: 100 });
             const sboms = assets.filter((asset) => asset.name === "sbom.cdx.json");
             if (assets.length !== 1 || sboms.length !== 1 || String(sboms[0].digest || "").replace(/^sha256:/, "") !== expectedSbom) throw new Error("Final release asset closure differs from the transported SBOM.");
-            core.info(`GitHub release ${tag}, npm provenance, and prepared commit ${expectedSha} are aligned.`);
+            core.info(`GitHub release ${tag}, npm provenance, and immutable release commit ${expectedSha} are aligned.`);

@@ -19,9 +19,18 @@ not manually create a versioned release section.
   - Post-publication npm install and signature verification retry for a bounded
     interval so registry-edge propagation cannot strand an otherwise verified
     immutable release; every retry still requires signatures to pass.
+  - Interrupted published-version recovery now separates the current
+    protected-main validation commit from the immutable npm-provenance release
+    commit, rebuilding the original source and preserving its tag identity.
 
 - **Security**
-  - (placeholder)
+  - Release transport schema v2 binds both validation and release commits,
+    rejects split authorities for unpublished versions, cross-checks published
+    provenance against the existing tag and protected-main ancestry, and skips
+    misleading replacement attestations during recovery. The Node/npm release
+    toolchain is fixed, and CycloneDX UUID and timestamp fields are normalized
+    from immutable release inputs so completed release recovery reproduces the
+    exact SBOM bytes.
 
 ## [0.1.0] - 2026-07-13
 

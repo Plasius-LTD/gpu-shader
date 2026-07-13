@@ -126,4 +126,6 @@ protection: it opens a pull request, enables auto-merge, and lets required
 checks and reviews control the merge. For an interrupted release, dispatch CD
 with `bump: none` only when `main` already contains that exact version; recovery
 still validates the packed bytes, npm provenance and signatures, tag, and
-GitHub release identity.
+GitHub release identity. If recovery runs from newer protected `main`, it
+rebuilds the immutable source commit resolved jointly by npm provenance and the
+existing tag; it never rebinds published bytes to the newer workflow commit.

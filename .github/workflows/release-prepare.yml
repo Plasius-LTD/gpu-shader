@@ -56,9 +56,12 @@ on:
       published:
         description: "Whether this exact package version already exists on npm"
         value: ${{ jobs.prepare.outputs.published }}
-      commit_sha:
-        description: "main commit containing the release metadata"
-        value: ${{ jobs.prepare.outputs.commit_sha }}
+      validation_commit_sha:
+        description: "protected-main commit authorizing this validation workflow"
+        value: ${{ jobs.prepare.outputs.validation_commit_sha }}
+      release_commit_sha:
+        description: "immutable package source commit bound to npm provenance and the release tag"
+        value: ${{ jobs.resolve_release.outputs.release_commit_sha }}
 
 permissions:
   actions: read
@@ -75,7 +78,7 @@ jobs:
       tag: ${{ steps.release.outputs.tag }}
       flags: ${{ steps.release.outputs.flags }}
       published: ${{ steps.release.outputs.published }}
-      commit_sha: ${{ steps.release.outputs.commit_sha }}
+      validation_commit_sha: ${{ steps.release.outputs.validation_commit_sha }}
     steps:
       - name: Checkout main
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
@@ -96,7 +99,7 @@ jobs:
       - name: Use Node.js 24
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
-          node-version-file: '.nvmrc'
+          node-version: '24.13.0'
           cache: 'npm'
 
       - name: Prepare and land release metadata
@@ -145,6 +148,7 @@ jobs:
 
           git fetch origin "${BASE_BRANCH}" --tags
           git checkout -B "${BASE_BRANCH}" "origin/${BASE_BRANCH}"
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
 
           PACKAGE_DIRECTORY="${PACKAGE_DIRECTORY%/}"
           if [ -z "${PACKAGE_DIRECTORY}" ]; then
@@ -503,6 +507,7 @@ jobs:
           git fetch origin "${BASE_BRANCH}" --tags
           git checkout -B "${BASE_BRANCH}" "origin/${BASE_BRANCH}"
 
+          git remote set-url origin "https://github.com/${GITHUB_REPOSITORY}.git"
           MAIN_VERSION=$(PACKAGE_JSON_PATH="${PACKAGE_JSON}" node -p "const path = require('node:path'); const pkg = require(path.resolve(process.env.PACKAGE_JSON_PATH)); pkg.version || ''")
           if [ "${MAIN_VERSION}" != "${TARGET_VER}" ]; then
             echo "${BASE_BRANCH} has package version ${MAIN_VERSION}, expected ${TARGET_VER}." >&2
@@ -541,12 +546,113 @@ jobs:
             fi
           fi
 
-          COMMIT_SHA=$(git rev-parse HEAD)
+          VALIDATION_COMMIT_SHA=$(git rev-parse HEAD)
+          if ! [[ "${VALIDATION_COMMIT_SHA}" =~ ^[a-f0-9]{40}$ ]]; then
+            echo "Protected-main validation commit is malformed." >&2
+            exit 1
+          fi
+
           {
             echo "name=${NAME}"
             echo "version=${TARGET_VER}"
             echo "tag=${TAG}"
             echo "flags=${FLAGS}"
             echo "published=${PUBLISHED}"
-            echo "commit_sha=${COMMIT_SHA}"
+            echo "validation_commit_sha=${VALIDATION_COMMIT_SHA}"
           } >> "${GITHUB_OUTPUT}"
+
+  resolve_release:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      release_commit_sha: ${{ steps.authority.outputs.release_commit_sha }}
+    steps:
+      - name: Checkout exact validation commit without credentials
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          ref: ${{ needs.prepare.outputs.validation_commit_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Use Node.js 24
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: '24.13.0'
+
+      - name: Resolve immutable release source authority
+        id: authority
+        env:
+          BASE_BRANCH: ${{ inputs.base_branch }}
+          BUMP: ${{ inputs.bump }}
+          EXPECTED_REPOSITORY: ${{ github.repository }}
+          PACKAGE_NAME: ${{ needs.prepare.outputs.name }}
+          PACKAGE_VERSION: ${{ needs.prepare.outputs.version }}
+          PREPARED_PUBLISHED: ${{ needs.prepare.outputs.published }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+          VALIDATION_COMMIT_SHA: ${{ needs.prepare.outputs.validation_commit_sha }}
+        run: |
+          set -euo pipefail
+          if [ "${BASE_BRANCH}" != "main" ] || ! [[ "${VALIDATION_COMMIT_SHA}" =~ ^[a-f0-9]{40}$ ]] || ! [[ "${PREPARED_PUBLISHED}" =~ ^(true|false)$ ]]; then
+            echo "Release authority inputs are malformed." >&2
+            exit 1
+          fi
+          if [ "$(git rev-parse HEAD)" != "${VALIDATION_COMMIT_SHA}" ]; then
+            echo "Release authority checkout differs from the exact validation commit." >&2
+            exit 1
+          fi
+
+          RELEASE_COMMIT_SHA="${VALIDATION_COMMIT_SHA}"
+          if [ "${PREPARED_PUBLISHED}" = "true" ]; then
+            if [ "${BUMP}" != "none" ]; then
+              echo "Published release recovery requires bump=none." >&2
+              exit 1
+            fi
+            if ! git show-ref --verify --quiet "refs/tags/${RELEASE_TAG}"; then
+              echo "Published package ${PACKAGE_NAME}@${PACKAGE_VERSION} has no immutable ${RELEASE_TAG} tag; recovery fails closed." >&2
+              exit 1
+            fi
+
+            RELEASE_COMMIT_SHA="$(
+              node <<'NODE'
+          const { resolvePublishedRelease } = require("./scripts/verify-npm-release.cjs");
+
+          const expected = {
+            packageName: process.env.PACKAGE_NAME,
+            version: process.env.PACKAGE_VERSION,
+            repository: process.env.EXPECTED_REPOSITORY,
+            workflow: ".github/workflows/cd.yml",
+          };
+          resolvePublishedRelease(expected).then(
+            (resolved) => process.stdout.write(resolved.commit),
+            (cause) => {
+              console.error(cause instanceof Error ? cause.message : String(cause));
+              process.exitCode = 1;
+            },
+          );
+          NODE
+            )"
+            if ! [[ "${RELEASE_COMMIT_SHA}" =~ ^[a-f0-9]{40}$ ]]; then
+              echo "Published npm provenance did not resolve one exact release commit." >&2
+              exit 1
+            fi
+
+            TAG_COMMIT_SHA=$(git rev-parse "refs/tags/${RELEASE_TAG}^{commit}")
+            if [ "${TAG_COMMIT_SHA}" != "${RELEASE_COMMIT_SHA}" ]; then
+              echo "Published npm provenance resolves to ${RELEASE_COMMIT_SHA}, but ${RELEASE_TAG} resolves to ${TAG_COMMIT_SHA}." >&2
+              exit 1
+            fi
+            if ! git merge-base --is-ancestor "${RELEASE_COMMIT_SHA}" "${VALIDATION_COMMIT_SHA}"; then
+              echo "Published release commit ${RELEASE_COMMIT_SHA} is not reachable from protected ${BASE_BRANCH} at ${VALIDATION_COMMIT_SHA}." >&2
+              exit 1
+            fi
+          fi
+
+          if [ "${PREPARED_PUBLISHED}" != "true" ] && [ "${RELEASE_COMMIT_SHA}" != "${VALIDATION_COMMIT_SHA}" ]; then
+            echo "An unpublished release cannot use different validation and release commits." >&2
+            exit 1
+          fi
+          echo "release_commit_sha=${RELEASE_COMMIT_SHA}" >> "${GITHUB_OUTPUT}"
