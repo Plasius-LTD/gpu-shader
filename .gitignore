@@ -49,6 +49,7 @@ web_modules/
 
 # Optional npm cache directory
 .npm
+.npm-cache-packcheck
 
 # Optional eslint cache
 .eslintcache
@@ -61,6 +62,7 @@ web_modules/
 
 # Output of 'npm pack'
 *.tgz
+release-artifacts/
 
 # Yarn Integrity file
 .yarn-integrity

@@ -1,0 +1,42 @@
+name: API or architecture proposal
+description: Propose a package change for maintainer triage and cross-repository planning.
+title: "[PROPOSAL] "
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and users
+      description: Describe the problem without prescribing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed contract or behavior
+      description: Include browser/Node boundaries, ABI impact, and failure behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and trade-offs
+    validations:
+      required: true
+  - type: textarea
+    id: qualification
+    attributes:
+      label: Testing and requalification impact
+      description: Explain affected compile units, profiles, model fixtures, matrix cells, or trusted harness behavior.
+    validations:
+      required: true
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: Framework constraints
+      options:
+        - label: Final assembled WGSL remains the GPU layout source of truth.
+          required: true
+        - label: Physical qualification remains data-only and fail closed.
+          required: true
