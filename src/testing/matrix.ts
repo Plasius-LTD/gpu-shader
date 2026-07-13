@@ -5,6 +5,7 @@ import {
   type ShaderResult,
   type StableWebGpuMatrixManifest,
 } from "../contracts.js";
+import { canonicalizeGpuContract } from "../canonical-json.js";
 
 function issue(message: string, path?: string): ShaderDiagnostic {
   return { code: "invalid-contract", severity: "error", message, ...(path ? { path } : {}) };
@@ -19,6 +20,14 @@ function object(value: unknown): Record<string, unknown> | null {
 function keys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const set = new Set(expected);
   return Object.keys(value).every((key) => set.has(key)) && expected.every((key) => key in value);
+}
+
+function canonicalEqual(left: unknown, right: unknown): boolean {
+  try {
+    return canonicalizeGpuContract(left) === canonicalizeGpuContract(right);
+  } catch {
+    return false;
+  }
 }
 
 const browserNames = new Set(["chromium", "chrome", "edge", "firefox", "safari"]);
@@ -120,7 +129,10 @@ export function validateStableWebGpuMatrix(value: unknown): ShaderResult<StableW
           ? keys(requirement, ["kind", "value"]) && Number.isSafeInteger(requirement.value) && Number(requirement.value) > 0
           : kind === "stable-channel" && keys(requirement, ["kind", "channel"]) && requirement.channel === "stable");
       if (!validRequirement) diagnostics.push(issue("OS version requirement is invalid.", `${path}.os.versionRequirement`));
-      if (typeof cell.cellId === "string" && JSON.stringify(requirement) !== JSON.stringify(VERSION_REQUIREMENTS.get(cell.cellId))) diagnostics.push(issue("OS version requirement differs from the stable baseline.", `${path}.os.versionRequirement`));
+      if (typeof cell.cellId === "string"
+        && !canonicalEqual(requirement, VERSION_REQUIREMENTS.get(cell.cellId))) {
+        diagnostics.push(issue("OS version requirement differs from the stable baseline.", `${path}.os.versionRequirement`));
+      }
     }
     if (!adapter || !keys(adapter, ["kind", "vendor", "family", "backend"]) || !["software", "physical"].includes(String(adapter.kind)) || !backends.has(String(adapter.backend))) diagnostics.push(issue("Adapter descriptor is invalid.", `${path}.adapter`));
     if (!adapterAutomation || !keys(adapterAutomation, ["kind"]) || !automation.has(String(adapterAutomation.kind))) diagnostics.push(issue("Automation descriptor is invalid.", `${path}.automation`));

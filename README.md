@@ -292,7 +292,10 @@ It contains 15 representative physical cells and one required Ubuntu Chromium
 SwiftShader smoke cell. All 16 are blocking; only the 15 physical cells count
 toward stable physical support. A skip, timeout, unavailable runner or adapter,
 device loss, missing result, stale evidence, or unexpected result fails the
-gate.
+gate. The checked-in file is the exact canonical JSON policy artifact; its byte
+digest must equal `SUPPORTED_STABLE_WEBGPU_MATRIX_POLICIES[0].matrixSha256`.
+Any policy-byte or digest change requires complete shader-inventory
+requalification and does not itself qualify a shader.
 
 Candidate archives may contain only declarative JSON, WGSL, and bounded binary
 fixtures. Physical runners execute a pinned trusted harness from this

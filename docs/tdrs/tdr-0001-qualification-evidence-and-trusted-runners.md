@@ -21,6 +21,13 @@ The qualification design must therefore prove two things independently:
 2. physical runner hosts executed only a fixed, reviewed harness against a
    bounded declarative candidate.
 
+The checked-in stable matrix is one exact canonical JSON artifact. Its SHA-256
+is the supported policy identity used by qualification preflight, evidence,
+shader manifests, and admission. Human-readable reformatting is therefore a
+policy-byte change. Any matrix bytes or supported digest change selects the
+complete shader inventory for requalification; publishing this contract alone
+does not claim that any shader or physical runner has passed.
+
 ## Decision
 
 ### Compile units and inventory
