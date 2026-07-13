@@ -16,6 +16,20 @@ not manually create a versioned release section.
   - (placeholder)
 
 - **Fixed**
+  - (placeholder)
+
+- **Security**
+  - (placeholder)
+
+## [0.1.1] - 2026-07-13
+
+- **Added**
+  - (placeholder)
+
+- **Changed**
+  - (placeholder)
+
+- **Fixed**
   - Canonicalized the shipped stable-WebGPU matrix and corrected its supported
     policy digest so the exact artifact accepted by qualification is also
     admissible at canonical JSON boundaries. The policy-identity change
@@ -122,7 +136,8 @@ not manually create a versioned release section.
 - Codecov uses OIDC and release/maintenance actions are pinned to reviewed
   Node-24-compatible revisions.
 
-[Unreleased]: https://github.com/Plasius-LTD/gpu-shader/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Plasius-LTD/gpu-shader/compare/v0.1.1...HEAD
 
 
 [0.1.0]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.0
+[0.1.1]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.1
