@@ -9,6 +9,20 @@ not manually create a versioned release section.
 
 ## [Unreleased]
 
+- **Added**
+  - (placeholder)
+
+- **Changed**
+  - (placeholder)
+
+- **Fixed**
+  - (placeholder)
+
+- **Security**
+  - (placeholder)
+
+## [0.1.0] - 2026-07-13
+
 ### Added
 
 - Initial browser-safe contracts for reflected GPU interfaces, immutable shader
@@ -89,4 +103,7 @@ not manually create a versioned release section.
 - Codecov uses OIDC and release/maintenance actions are pinned to reviewed
   Node-24-compatible revisions.
 
-[Unreleased]: https://github.com/Plasius-LTD/gpu-shader/commits/main
+[Unreleased]: https://github.com/Plasius-LTD/gpu-shader/compare/v0.1.0...HEAD
+
+
+[0.1.0]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.0
