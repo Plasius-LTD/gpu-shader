@@ -5,7 +5,7 @@ import {
   type ShaderResult,
   type StableWebGpuMatrixManifest,
 } from "../contracts.js";
-import { canonicalizeGpuContract } from "../canonical-json.js";
+import { canonicalizeGpuContract, snapshotGpuContract } from "../canonical-json.js";
 
 function issue(message: string, path?: string): ShaderDiagnostic {
   return { code: "invalid-contract", severity: "error", message, ...(path ? { path } : {}) };
@@ -19,7 +19,13 @@ function object(value: unknown): Record<string, unknown> | null {
 
 function keys(value: Record<string, unknown>, expected: readonly string[]): boolean {
   const set = new Set(expected);
-  return Object.keys(value).every((key) => set.has(key)) && expected.every((key) => key in value);
+  return Object.keys(value).every((key) => set.has(key)) && expected.every((key) => Object.hasOwn(value, key));
+}
+
+function freezeJson<T>(value: T): T {
+  if (typeof value !== "object" || value === null || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value as Record<string, unknown>)) freezeJson(child);
+  return Object.freeze(value);
 }
 
 function canonicalEqual(left: unknown, right: unknown): boolean {
@@ -75,7 +81,13 @@ const BASELINE = new Map<string, string>([
 
 /** Strictly validates the versioned 16-cell stable WebGPU support matrix. */
 export function validateStableWebGpuMatrix(value: unknown): ShaderResult<StableWebGpuMatrixManifest> {
-  const matrix = object(value);
+  let snapshot: unknown;
+  try {
+    snapshot = snapshotGpuContract(value);
+  } catch {
+    return { ok: false, diagnostics: [issue("Matrix must contain bounded detached JSON contract data.")] };
+  }
+  const matrix = object(snapshot);
   const diagnostics: ShaderDiagnostic[] = [];
   if (!matrix || !keys(matrix, ["contractVersion", "matrixId", "version", "policy", "cells"])) {
     return { ok: false, diagnostics: [issue("Matrix has unknown or missing top-level fields.")] };
@@ -153,5 +165,5 @@ export function validateStableWebGpuMatrix(value: unknown): ShaderResult<StableW
   if (physical !== 15 || blocking !== 16 || software !== 1 || ids.size !== BASELINE.size) diagnostics.push(issue("Matrix must contain the exact 15 physical baseline cells plus one SwiftShader smoke cell."));
   return diagnostics.length > 0
     ? { ok: false, diagnostics }
-    : { ok: true, value: matrix as unknown as StableWebGpuMatrixManifest };
+    : { ok: true, value: freezeJson(matrix as unknown as StableWebGpuMatrixManifest) };
 }

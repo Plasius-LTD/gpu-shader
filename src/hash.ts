@@ -1,4 +1,4 @@
-import { canonicalizeGpuContract } from "./canonical-json.js";
+import { canonicalizeGpuContract, snapshotGpuContract } from "./canonical-json.js";
 import type {
   GpuInterfaceManifest,
   SerializableGpuPipelineDescriptor,
@@ -117,28 +117,29 @@ export type ComputeGpuAbiHashInput =
 
 /** Computes a domain-separated ABI digest over normalized structural data. */
 export async function computeGpuAbiHash(input: ComputeGpuAbiHashInput): Promise<Sha256Hex> {
-  if (input.kind === "model") {
+  const snapshot = snapshotGpuContract(input) as unknown as ComputeGpuAbiHashInput;
+  if (snapshot.kind === "model") {
     return computeSha256(
-      `plasius.gpu.model-abi/v1\n${canonicalizeGpuContract(modelProjection(input.interface))}`,
+      `plasius.gpu.model-abi/v1\n${canonicalizeGpuContract(modelProjection(snapshot.interface))}`,
     );
   }
-  if (input.kind === "interface") {
+  if (snapshot.kind === "interface") {
     return computeSha256(
-      `plasius.gpu.interface-abi/v1\n${canonicalizeGpuContract(interfaceProjection(input.interface))}`,
+      `plasius.gpu.interface-abi/v1\n${canonicalizeGpuContract(interfaceProjection(snapshot.interface))}`,
     );
   }
-  const pipelines = sorted(input.pipelines, (left, right) =>
+  const pipelines = sorted(snapshot.pipelines, (left, right) =>
     compareString(left.pipelineId, right.pipelineId),
   );
   const requirements = {
-    semantics: [...input.requirements.semantics].sort(),
-    features: [...input.requirements.features].sort(),
-    limits: sorted(input.requirements.limits, (left, right) => compareString(left.name, right.name)),
-    formats: [...input.requirements.formats].sort(),
+    semantics: [...snapshot.requirements.semantics].sort(),
+    features: [...snapshot.requirements.features].sort(),
+    limits: sorted(snapshot.requirements.limits, (left, right) => compareString(left.name, right.name)),
+    formats: [...snapshot.requirements.formats].sort(),
   };
   return computeSha256(
     `plasius.gpu.shader-abi/v1\n${canonicalizeGpuContract({
-      interface: interfaceProjection(input.interface),
+      interface: interfaceProjection(snapshot.interface),
       pipelines,
       requirements,
     })}`,
@@ -149,7 +150,8 @@ export async function computeGpuAbiHash(input: ComputeGpuAbiHashInput): Promise<
 export async function computeShaderManifestCoreSha256(
   manifest: Omit<ShaderVersionManifest, "validationEvidence" | "additionalValidationEvidence"> | ShaderVersionManifest,
 ): Promise<Sha256Hex> {
-  const core = Object.fromEntries(Object.entries(manifest).filter(
+  const snapshot = snapshotGpuContract(manifest) as unknown as Record<string, unknown>;
+  const core = Object.fromEntries(Object.entries(snapshot).filter(
     ([key]) => key !== "validationEvidence" && key !== "additionalValidationEvidence",
   ));
   return computeSha256(

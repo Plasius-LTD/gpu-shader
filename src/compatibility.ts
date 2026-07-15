@@ -8,7 +8,7 @@ import type {
   ShaderStyleProfileManifest,
   ShaderVersionManifestCore,
 } from "./contracts.js";
-import { canonicalizeGpuContract } from "./canonical-json.js";
+import { snapshotGpuContract } from "./canonical-json.js";
 import {
   parseGpuInterfaceManifest,
   parseModelGpuCompatibilityDescriptor,
@@ -42,10 +42,6 @@ function interfaceMatches(
     && item.manifestSha256 === model.gpuInterface.manifestSha256
     && item.interfaceAbiHash === model.gpuInterface.interfaceAbiHash
     && item.modelAbiHash === model.modelAbiHash;
-}
-
-function detachedContract(value: unknown): unknown {
-  return JSON.parse(canonicalizeGpuContract(value)) as unknown;
 }
 
 function hasValidationEvidence(value: unknown): boolean {
@@ -118,11 +114,21 @@ export function validateModelShaderCompatibility(input: {
   let profile: ShaderStyleProfileManifest | undefined;
   let capabilities: GpuCapabilitySnapshot | undefined;
   try {
-    const modelSnapshot = detachedContract(input.model);
-    const shaderSnapshot = detachedContract(input.shader);
-    const gpuInterfaceSnapshot = detachedContract(input.gpuInterface);
-    const profileValue = input.profile;
-    const profileSnapshot = profileValue === undefined ? undefined : detachedContract(profileValue);
+    const snapshot = snapshotGpuContract(input);
+    if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) {
+      throw new TypeError("GPU compatibility input must be a bounded contract object.");
+    }
+    const envelope = snapshot as Readonly<Record<string, unknown>>;
+    const keys = Object.keys(envelope);
+    const allowed = new Set(["model", "shader", "gpuInterface", "profile", "capabilities"]);
+    if (keys.some((key) => !allowed.has(key))
+      || !["model", "shader", "gpuInterface"].every((key) => Object.hasOwn(envelope, key))) {
+      throw new TypeError("GPU compatibility input has unknown or missing fields.");
+    }
+    const modelSnapshot = envelope.model;
+    const shaderSnapshot = envelope.shader;
+    const gpuInterfaceSnapshot = envelope.gpuInterface;
+    const profileSnapshot = Object.hasOwn(envelope, "profile") ? envelope.profile : undefined;
 
     model = parseModelGpuCompatibilityDescriptor(modelSnapshot);
     shader = hasValidationEvidence(shaderSnapshot)
@@ -132,7 +138,9 @@ export function validateModelShaderCompatibility(input: {
     profile = profileSnapshot === undefined
       ? undefined
       : parseShaderStyleProfileManifest(profileSnapshot);
-    capabilities = input.capabilities;
+    capabilities = Object.hasOwn(envelope, "capabilities")
+      ? envelope.capabilities as GpuCapabilitySnapshot
+      : undefined;
   } catch (cause) {
     return {
       ok: false,

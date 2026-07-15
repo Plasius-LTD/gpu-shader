@@ -6,7 +6,10 @@ import {
   type ShaderQualificationFixtureManifest,
   type ShaderResult,
 } from "../contracts.js";
-import { canonicalizeGpuContract } from "../canonical-json.js";
+import {
+  QUALIFICATION_GPU_CONTRACT_SNAPSHOT_LIMITS,
+  snapshotGpuContract,
+} from "../canonical-json.js";
 import { assertImmutableAssetVersion } from "../asset-version.js";
 import { asSha256Hex } from "../hash.js";
 import { validateCompileUnitInventory } from "./inventory.js";
@@ -82,9 +85,9 @@ function object(value: unknown, path: string): UnknownRecord {
 
 function detachedJson(value: unknown, label: string): unknown {
   try {
-    return JSON.parse(canonicalizeGpuContract(value)) as unknown;
-  } catch (cause) {
-    throw new TypeError(`${label} must contain detached JSON contract data.`, { cause });
+    return snapshotGpuContract(value, QUALIFICATION_GPU_CONTRACT_SNAPSHOT_LIMITS);
+  } catch {
+    throw new TypeError(`${label} must contain bounded detached JSON contract data.`);
   }
 }
 
@@ -96,7 +99,7 @@ function freezeJson<T>(value: T): T {
 
 function exact(value: UnknownRecord, keys: readonly string[], path: string): void {
   const expected = new Set(keys);
-  if (!Object.keys(value).every((key) => expected.has(key)) || !keys.every((key) => key in value)) throw new TypeError(`${path} has unknown or missing fields.`);
+  if (!Object.keys(value).every((key) => expected.has(key)) || !keys.every((key) => Object.hasOwn(value, key))) throw new TypeError(`${path} has unknown or missing fields.`);
 }
 
 function token(value: unknown, path: string): string {
@@ -107,11 +110,8 @@ function token(value: unknown, path: string): string {
 function immutableVersion(value: unknown, path: string): string {
   try {
     return assertImmutableAssetVersion(value);
-  } catch (cause) {
-    throw new TypeError(
-      `${path} must be an immutable asset version: exact token required; mutable aliases, ranges, wildcards, and URLs are not allowed.`,
-      { cause },
-    );
+  } catch {
+    throw new TypeError(`${path} must be an immutable asset version: exact token required; mutable aliases, ranges, wildcards, and URLs are not allowed.`);
   }
 }
 
@@ -124,7 +124,7 @@ function path(value: unknown, label: string, extensions: readonly string[]): str
 
 function sha(value: unknown, label: string): string {
   try { return asSha256Hex(String(value)); }
-  catch (cause) { throw new TypeError(`${label} must be a lowercase SHA-256 digest.`, { cause }); }
+  catch { throw new TypeError(`${label} must be a lowercase SHA-256 digest.`); }
 }
 
 function integer(value: unknown, label: string, minimum = 0, maximum = 0xffff_ffff): number {
@@ -275,6 +275,9 @@ export function validateQualificationFixture(
   unit?: ShaderCompileUnitManifest,
 ): ShaderResult<ShaderQualificationFixtureManifest> {
   try {
+    const compileUnit = unit === undefined
+      ? undefined
+      : detachedJson(unit, "compile unit") as ShaderCompileUnitManifest;
     const fixture = object(detachedJson(value, "fixture"), "fixture"); exact(fixture, ["contractVersion", "fixtureId", "resources", "bindGroups", "commands", "layoutProbes", "readbacks", "bounds"], "fixture");
     if (fixture.contractVersion !== SHADER_QUALIFICATION_FIXTURE_VERSION) throw new TypeError("Unsupported qualification fixture version.");
     token(fixture.fixtureId, "fixture.fixtureId");
@@ -341,11 +344,11 @@ export function validateQualificationFixture(
       unique(bindingIds, `${label}.entries`);
       bindGroups.set(id, { group: groupIndex, entries: parsedEntries });
     }
-    const pipelines = new Map(unit?.pipelines.map((pipeline) => [pipeline.pipelineId, pipeline]) ?? []);
+    const pipelines = new Map(compileUnit?.pipelines.map((pipeline) => [pipeline.pipelineId, pipeline]) ?? []);
     const pipelineIds = new Set(pipelines.keys());
     const commandBindGroups = (value: unknown, pipelineId: string, label: string): void => {
       const ids = boundedArray(value, label, 32).map((item, index) => token(item, `${label}[${index}]`)); unique(ids, label);
-      const pipeline = pipelines.get(pipelineId); if (!pipeline) { if (unit) throw new TypeError(`${label} pipeline is missing.`); return; }
+      const pipeline = pipelines.get(pipelineId); if (!pipeline) { if (compileUnit) throw new TypeError(`${label} pipeline is missing.`); return; }
       const expectedGroups = [...pipeline.layout.bindGroups].sort((left, right) => left.group - right.group);
       if (ids.length !== expectedGroups.length) throw new TypeError(`${label} must bind every pipeline group exactly once.`);
       ids.forEach((id, index) => { const actual = bindGroups.get(id); const expected = expectedGroups[index]!; if (!actual || actual.group !== expected.group) throw new TypeError(`${label}[${index}] does not match pipeline group ${expected.group}.`); const actualBindings = actual.entries.map((entry) => Number(entry.binding)).sort((left, right) => left - right); const expectedBindings = expected.entries.map((entry) => entry.binding).sort((left, right) => left - right); if (actualBindings.join(",") !== expectedBindings.join(",")) throw new TypeError(`${label}[${index}] bind-group entries differ from the pipeline layout.`); });
@@ -354,7 +357,7 @@ export function validateQualificationFixture(
     let executionCommands = 0;
     for (const [index, value] of commands.entries()) {
       const label = `fixture.commands[${index}]`; const command = object(value, label); const kind = String(command.kind);
-      if (kind === "dispatch") { executionCommands += 1; exact(command, ["kind", "pipelineId", "bindGroupIds", "workgroups"], label); const id = token(command.pipelineId, `${label}.pipelineId`); if (unit && (pipelines.get(id)?.kind !== "compute")) throw new TypeError(`${label} references a missing or non-compute pipeline.`); commandBindGroups(command.bindGroupIds, id, `${label}.bindGroupIds`); const workgroups = tuple(command.workgroups, `${label}.workgroups`, 3, 1); if (workgroups[0]! * workgroups[1]! * workgroups[2]! > 1_048_576) throw new TypeError(`${label}.workgroups exceeds the hard dispatch bound.`); }
+      if (kind === "dispatch") { executionCommands += 1; exact(command, ["kind", "pipelineId", "bindGroupIds", "workgroups"], label); const id = token(command.pipelineId, `${label}.pipelineId`); if (compileUnit && (pipelines.get(id)?.kind !== "compute")) throw new TypeError(`${label} references a missing or non-compute pipeline.`); commandBindGroups(command.bindGroupIds, id, `${label}.bindGroupIds`); const workgroups = tuple(command.workgroups, `${label}.workgroups`, 3, 1); if (workgroups[0]! * workgroups[1]! * workgroups[2]! > 1_048_576) throw new TypeError(`${label}.workgroups exceeds the hard dispatch bound.`); }
       else if (kind === "copy-buffer") { exact(command, ["kind", "source", "destination", "byteLength"], label); const source = resources.get(token(command.source, `${label}.source`)); const destination = resources.get(token(command.destination, `${label}.destination`)); const bytes = integer(command.byteLength, `${label}.byteLength`, 1); if (source?.kind !== "buffer" || destination?.kind !== "buffer" || bytes > (source.byteLength ?? 0) || bytes > (destination.byteLength ?? 0)) throw new TypeError(`${label} is out of bounds.`); }
       else if (kind === "copy-texture-to-buffer") {
         exact(command, ["kind", "source", "destination", "extent"], label);

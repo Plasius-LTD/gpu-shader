@@ -16,7 +16,13 @@ import {
   type ShaderVersionManifest,
   type ShaderVersionManifestCore,
 } from "./contracts.js";
-import { canonicalizeGpuContract as canonicalizeForValidation } from "./canonical-json.js";
+import {
+  canonicalizeGpuContract as canonicalizeForValidation,
+  GPU_CONTRACT_SNAPSHOT_LIMITS,
+  GpuContractSnapshotError,
+  snapshotGpuContract,
+  snapshotUint8Array,
+} from "./canonical-json.js";
 import { assertImmutableAssetVersion } from "./asset-version.js";
 import { asSha256Hex } from "./hash.js";
 import { validatePipelineDerivedRequirements } from "./requirements-validation.js";
@@ -27,11 +33,11 @@ const roles = ["material", "lighting", "outline", "shadow", "post-processing"] a
 
 function detachedJson(value: unknown, path: string): unknown {
   try {
-    return JSON.parse(canonicalizeForValidation(value)) as unknown;
+    return snapshotGpuContract(value);
   } catch (cause) {
-    const detail = cause instanceof Error ? cause.message : "Contract snapshot failed.";
-    const boundedDetail = [...detail].slice(0, 512).join("");
-    throw new TypeError(`${path} must contain detached JSON contract data: ${boundedDetail}`, { cause });
+    const detail = cause instanceof GpuContractSnapshotError ? ` ${cause.message}` : "";
+    // eslint-disable-next-line preserve-caught-error -- caller/proxy failures must never escape this trust boundary
+    throw new TypeError(`${path} must contain bounded detached JSON contract data.${detail}`);
   }
 }
 
@@ -43,7 +49,7 @@ function object(value: unknown, path: string): UnknownRecord {
 function exact(value: UnknownRecord, keys: readonly string[], path: string): void {
   const allowed = new Set(keys);
   for (const key of Object.keys(value)) if (!allowed.has(key)) throw new TypeError(`${path}.${key} is not part of this contract version.`);
-  for (const key of keys) if (!(key in value)) throw new TypeError(`${path}.${key} is required.`);
+  for (const key of keys) if (!Object.hasOwn(value, key)) throw new TypeError(`${path}.${key} is required.`);
 }
 
 function text(value: unknown, path: string, maximum = 512): string {
@@ -62,11 +68,8 @@ function token(value: unknown, path: string): string {
 function immutableVersion(value: unknown, path: string): string {
   try {
     return assertImmutableAssetVersion(value);
-  } catch (cause) {
-    throw new TypeError(
-      `${path} must be an immutable asset version: exact token required; mutable aliases, ranges, wildcards, and URLs are not allowed.`,
-      { cause },
-    );
+  } catch {
+    throw new TypeError(`${path} must be an immutable asset version: exact token required; mutable aliases, ranges, wildcards, and URLs are not allowed.`);
   }
 }
 
@@ -102,14 +105,14 @@ function nullableToken(value: unknown, path: string): string | null {
 
 function digest(value: unknown, path: string): string {
   try { return asSha256Hex(text(value, path, 64)); }
-  catch (cause) { throw new TypeError(`${path} must be a lowercase SHA-256 digest.`, { cause }); }
+  catch { throw new TypeError(`${path} must be a lowercase SHA-256 digest.`); }
 }
 
 function uri(value: unknown, path: string): string {
   const result = text(value, path, 2048);
   let parsed: URL;
   try { parsed = new URL(result); }
-  catch (cause) { throw new TypeError(`${path} must be an absolute immutable asset URI.`, { cause }); }
+  catch { throw new TypeError(`${path} must be an absolute immutable asset URI.`); }
   if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.hash) throw new TypeError(`${path} must be credential-free HTTPS without a fragment.`);
   const keys = [...parsed.searchParams.keys()].map((key) => key.toLowerCase());
   const forbidden = new Set(["sig", "se", "sp", "sv", "spr", "st", "skoid", "sktid", "skt", "ske", "sks", "skv"]);
@@ -676,6 +679,24 @@ export function parseShaderQualificationModelCompatibilityFixture(value: unknown
 }
 
 export function parseJsonBytes(bytes: Uint8Array, label: string): unknown {
-  try { return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)); }
-  catch (cause) { throw new TypeError(`${label} is not valid UTF-8 JSON.`, { cause }); }
+  const safeLabel = typeof label === "string" && /^[A-Za-z0-9 ._-]{1,80}$/u.test(label)
+    ? label
+    : "GPU contract";
+  let snapshot: Uint8Array;
+  try {
+    snapshot = snapshotUint8Array(bytes, GPU_CONTRACT_SNAPSHOT_LIMITS.maximumInputBytes);
+  } catch {
+    throw new TypeError(`${safeLabel} is not bounded UTF-8 JSON.`);
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(snapshot)) as unknown;
+  } catch {
+    throw new TypeError(`${safeLabel} is not valid UTF-8 JSON.`);
+  }
+  try {
+    return snapshotGpuContract(parsed);
+  } catch {
+    throw new TypeError(`${safeLabel} is not bounded detached JSON contract data.`);
+  }
 }

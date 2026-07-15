@@ -13,13 +13,29 @@ not manually create a versioned release section.
   - (placeholder)
 
 - **Changed**
-  - (placeholder)
+  - Canonical JSON and ABI hashing now operate on bounded descriptor-only
+    snapshots. Runtime/model contracts and full qualification products use
+    separate named finite policies; changing those policies requires affected
+    shader requalification.
 
 - **Fixed**
-  - (placeholder)
+  - Strict model, interface, shader, profile, compatibility, matrix, inventory,
+    qualification, evidence, and runtime-reference parsers now reject
+    accessor-backed, sparse, behavioral, cyclic, deep, and oversized values
+    before schema field access.
+  - UTF-8 byte parsing and catalog asset copying now use TypedArray intrinsics
+    without caller property/species reads, while retaining Buffer, subclass,
+    and cross-realm Uint8Array compatibility. Runtime request envelopes and
+    attestation verifiers also sanitize accessor/provider failures.
+  - The build graph now resolves `esbuild` 0.28.1 or later, removing the
+    Windows development-server arbitrary-file-read advisory from the audited
+    dependency closure.
 
 - **Security**
-  - (placeholder)
+  - Caller property getters and Proxy `get` traps are no longer invoked while
+    detaching GPU contracts. Unavoidable Proxy reflection failures are replaced
+    with constant bounded diagnostics without retaining raw causes or provider
+    messages.
 
 ## [0.1.2] - 2026-07-15
 

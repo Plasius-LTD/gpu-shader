@@ -122,7 +122,7 @@ describe("immutable GPU asset versions", () => {
     expect(() => parseModelGpuCompatibilityDescriptor(modelProfile)).toThrow(error);
   });
 
-  it("detaches version accessors before returning strict parsed contracts", async () => {
+  it("rejects version accessors before invoking them", async () => {
     const assets = await shaderAssets();
     const cases = [
       [clone(assets.gpuInterface), "interfaceVersion", parseGpuInterfaceManifest],
@@ -132,18 +132,18 @@ describe("immutable GPU asset versions", () => {
     ] as const;
 
     for (const [contract, field, parse] of cases) {
-      const exact = Reflect.get(contract, field) as string;
       let reads = 0;
       Object.defineProperty(contract, field, {
         configurable: true,
         enumerable: true,
-        get: () => reads++ === 0 ? exact : "latest",
+        get: () => {
+          reads += 1;
+          return "1";
+        },
       });
 
-      const parsed = parse(contract as never) as unknown as Record<string, unknown>;
-      expect(parsed[field]).toBe(exact);
-      expect(reads).toBe(1);
-      expect(Object.isFrozen(parsed)).toBe(true);
+      expect(() => parse(contract as never)).toThrow(/bounded detached JSON contract data/u);
+      expect(reads).toBe(0);
     }
   });
 
@@ -216,7 +216,7 @@ describe("immutable GPU asset versions", () => {
     expect(loadInterface).not.toHaveBeenCalled();
   });
 
-  it("snapshots a validated profile ref before giving it to the catalog", async () => {
+  it("rejects a profile-ref accessor before giving it to the catalog", async () => {
     const assets = await shaderAssets();
     const base = await promotedCatalog();
     let versionReads = 0;
@@ -224,7 +224,10 @@ describe("immutable GPU asset versions", () => {
     const ref = { ...assets.profileRef } as Mutable<ShaderStyleProfileRef>;
     Object.defineProperty(ref, "version", {
       enumerable: true,
-      get: () => versionReads++ === 0 ? assets.profileRef.version : "latest",
+      get: () => {
+        versionReads += 1;
+        return assets.profileRef.version;
+      },
     });
     const catalog: PromotedShaderCatalogResolver = {
       ...base,
@@ -236,9 +239,9 @@ describe("immutable GPU asset versions", () => {
 
     const result = await loadShaderStyleProfile({ ref, catalog });
 
-    expect(result.ok).toBe(true);
-    expect(observedVersion).toBe(assets.profileRef.version);
-    expect(versionReads).toBe(1);
+    expect(result.ok).toBe(false);
+    expect(observedVersion).toBeUndefined();
+    expect(versionReads).toBe(0);
   });
 
   it("fails direct compatibility checks closed for mutable model contracts", async () => {

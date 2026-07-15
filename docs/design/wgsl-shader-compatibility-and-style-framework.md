@@ -6,6 +6,8 @@
 - Style-selection capability: `gpu.shader.style.select`
 - Architecture: [ADR 0001](../adrs/adr-0001-final-assembled-wgsl-is-the-interface-source-of-truth.md)
 - Qualification: [TDR 0001](../tdrs/tdr-0001-qualification-evidence-and-trusted-runners.md)
+- Contract snapshot boundary: [ADR 0004](../adrs/adr-0004-bounded-own-data-contract-snapshot-boundary.md)
+- Snapshot limits: [TDR 0003](../tdrs/tdr-0003-bounded-contract-snapshot-policies.md)
 
 ## Goals
 
@@ -281,6 +283,14 @@ Typed diagnostics describe invalid contracts, digests, ABI mismatch, missing
 semantics/features/limits/formats, unpromoted assets, compilation/pipeline
 failure, device loss and activation failure. Failure retains the current or
 default profile.
+
+All JavaScript contract values cross the bounded own-data snapshot described
+by ADR 0004 before step 4 reads a schema field. Runtime/model inputs and full
+qualification products use the separate finite policies in TDR 0003. The
+snapshot copies descriptor values only, rejects accessors and sparse or
+behavioral structures, and sanitizes unavoidable Proxy reflection failures
+without preserving their cause. This makes the strict parser a resource and
+code-execution boundary as well as a schema boundary.
 
 ## Style discovery and access
 

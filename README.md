@@ -52,6 +52,29 @@ strict manifest parsers and versioned contracts. The build APIs
 `reflectGpuInterface`, `validateAssembledGpuInterface`, and
 `generateGpuInterfaceArtifacts` are exposed only from the Node subpath.
 
+### Bounded contract snapshot boundary
+
+Every browser-safe manifest, compatibility, matrix, inventory, qualification,
+evidence, and runtime-reference parser snapshots contract data before reading
+schema fields. The snapshot accepts only JSON primitives, local-realm plain
+objects, and dense ordinary arrays whose fields are own enumerable data
+properties. Accessors, symbols, hidden fields, behavioral prototypes, sparse
+or custom arrays, cycles, invalid Unicode, and over-limit graphs fail closed.
+
+The snapshot never invokes a property getter or Proxy `get` trap. JavaScript
+cannot portably detect a transparent Proxy, so its `getPrototypeOf`, `ownKeys`,
+and `getOwnPropertyDescriptor` reflection traps may run. Any reflection failure
+is replaced by a fixed bounded diagnostic; the thrown provider value is not
+interpolated or retained as `error.cause`. Cross-realm or behavioral values
+must first be JSON-decoded or structured-cloned into the current realm.
+
+Runtime/model contracts and complete qualification products use separate
+finite policies. The exact depth, node, property, element, per-string,
+aggregate-string, aggregate-data, and encoded-input ceilings are recorded in
+[TDR 0003](docs/tdrs/tdr-0003-bounded-contract-snapshot-policies.md). Valid
+plain JSON retains byte-identical canonical JSON and ABI hashes. Changing a
+policy requires affected shader requalification.
+
 ## Installation
 
 After an approved GitHub CD release publishes the package:
@@ -210,6 +233,19 @@ const bytes = codec.encode({
 The codec is little-endian, bounds checked, strict about unknown or missing
 members, and writes deterministic zero padding. Unsupported or non-finite
 values fail before upload.
+
+For network/storage input, prefer `parseJsonBytes` followed by the strict
+manifest parser. Both encoded bytes and the resulting data graph are bounded;
+syntax, UTF-8, snapshot, and schema failures do not retain parser/provider
+causes.
+
+Byte input is brand-checked and copied with captured TypedArray intrinsics, so
+`Buffer`, Uint8Array subclasses, and cross-realm Uint8Arrays remain supported
+without reading caller `byteLength`, `constructor`, iterator, or index
+properties. Proxy-wrapped typed arrays fail the intrinsic brand check. Runtime
+style-load request fields and catalog asset-result fields must likewise be
+enumerable own data properties; catalog and attestation callback failures are
+reported with fixed cause-free diagnostics.
 
 ## Validate a model and shader
 

@@ -177,7 +177,7 @@ describe("promoted catalog fail-closed edge coverage", () => {
       ref: assets.profileRef,
       catalog: await promotedCatalog({ loadProfile: async () => { throw "resolver failed"; } }),
     });
-    expect(thrown).toEqual({ ok: false, diagnostics: [{ code: "invalid-contract", severity: "error", message: "Style profile loading failed." }] });
+    expect(thrown).toEqual({ ok: false, diagnostics: [{ code: "invalid-contract", severity: "error", message: "Style profile provider request failed." }] });
   });
 
   it("deduplicates exact shader loads across roles and handles a primitive abort reason", async () => {

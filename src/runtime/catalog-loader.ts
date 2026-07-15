@@ -10,7 +10,12 @@ import type {
   ShaderValidationEvidenceRef,
   ShaderVersionRef,
 } from "../contracts.js";
-import { canonicalizeGpuContract } from "../canonical-json.js";
+import {
+  canonicalizeGpuContract,
+  GPU_CONTRACT_SNAPSHOT_LIMITS,
+  snapshotGpuContract,
+  snapshotUint8Array,
+} from "../canonical-json.js";
 import { assertImmutableAssetVersion } from "../asset-version.js";
 import { computeGpuAbiHash, computeSha256 } from "../hash.js";
 import {
@@ -26,38 +31,199 @@ function diagnostic(code: ShaderDiagnostic["code"], message: string, path?: stri
   return { code, severity: "error", message, ...(path ? { path } : {}) };
 }
 
-async function verifyBytes(bytes: Uint8Array, expected: string, label: string): Promise<void> {
-  const actual = await computeSha256(bytes);
-  if (actual !== expected) throw new TypeError(`${label} digest does not match its immutable reference.`);
+class CatalogLoadError extends TypeError {
+  readonly diagnosticCode: ShaderDiagnostic["code"];
+
+  constructor(message: string, diagnosticCode: ShaderDiagnostic["code"] = "invalid-contract") {
+    super(message);
+    this.name = "CatalogLoadError";
+    this.diagnosticCode = diagnosticCode;
+  }
 }
 
-function copyBytes(bytes: Uint8Array): Uint8Array {
-  return new Uint8Array(bytes);
+function catalogFailure(
+  message: string,
+  diagnosticCode: ShaderDiagnostic["code"] = "invalid-contract",
+): CatalogLoadError {
+  return new CatalogLoadError(message, diagnosticCode);
+}
+
+function catalogContractStep<T>(operation: () => T, fallback: string): T {
+  try {
+    return operation();
+  } catch (cause) {
+    if (cause instanceof CatalogLoadError) throw cause;
+    throw catalogFailure(cause instanceof TypeError ? cause.message : fallback);
+  }
+}
+
+async function catalogContractStepAsync<T>(
+  operation: () => Promise<T>,
+  fallback: string,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (cause) {
+    if (cause instanceof CatalogLoadError) throw cause;
+    throw catalogFailure(cause instanceof TypeError ? cause.message : fallback);
+  }
+}
+
+async function verifyBytes(bytes: Uint8Array, expected: string, label: string): Promise<void> {
+  const actual = await catalogContractStepAsync(
+    () => computeSha256(bytes),
+    `${label} digest could not be computed.`,
+  );
+  if (actual !== expected) {
+    throw catalogFailure(
+      `${label} digest does not match its immutable reference.`,
+      "digest-mismatch",
+    );
+  }
+}
+
+type CatalogAssetBytes = { readonly bytes: Uint8Array; readonly promoted: boolean };
+
+function inspectCatalogAsset(
+  value: unknown,
+  label: string,
+  maximumBytes: number,
+): CatalogAssetBytes {
+  try {
+    if (typeof value !== "object" || value === null) throw new TypeError();
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== 2 || !keys.includes("bytes") || !keys.includes("promoted")) {
+      throw new TypeError();
+    }
+    const bytes = Reflect.getOwnPropertyDescriptor(value, "bytes");
+    const promoted = Reflect.getOwnPropertyDescriptor(value, "promoted");
+    if (
+      !bytes?.enumerable
+      || !Object.hasOwn(bytes, "value")
+      || !promoted?.enumerable
+      || !Object.hasOwn(promoted, "value")
+      || typeof promoted.value !== "boolean"
+    ) {
+      throw new TypeError();
+    }
+    return Object.freeze({
+      bytes: snapshotUint8Array(bytes.value, maximumBytes),
+      promoted: promoted.value,
+    });
+  } catch {
+    throw catalogFailure(`${label} returned invalid detached asset bytes.`);
+  }
+}
+
+async function loadCatalogAsset(
+  operation: () => Promise<unknown>,
+  label: string,
+  maximumBytes: number,
+): Promise<CatalogAssetBytes> {
+  let value: unknown;
+  try {
+    value = await operation();
+  } catch {
+    throw catalogFailure(`${label} provider request failed.`);
+  }
+  return inspectCatalogAsset(value, label, maximumBytes);
+}
+
+function isCatalogAssetUri(
+  catalog: PromotedShaderCatalogResolver,
+  uri: string,
+): boolean {
+  try {
+    const result = catalog.isCatalogAssetUri(uri);
+    if (typeof result !== "boolean") throw new TypeError();
+    return result;
+  } catch {
+    throw catalogFailure("Promoted catalog URI validation failed.");
+  }
+}
+
+function inspectLoadRequest(value: unknown): {
+  readonly ref: ShaderStyleProfileRef;
+  readonly catalog: PromotedShaderCatalogResolver;
+  readonly signal?: AbortSignal;
+} {
+  try {
+    if (typeof value !== "object" || value === null) throw new TypeError();
+    const keys = Reflect.ownKeys(value);
+    if (
+      keys.some((key) => typeof key !== "string" || !["ref", "catalog", "signal"].includes(key))
+      || !keys.includes("ref")
+      || !keys.includes("catalog")
+    ) {
+      throw new TypeError();
+    }
+    const ref = Reflect.getOwnPropertyDescriptor(value, "ref");
+    const catalog = Reflect.getOwnPropertyDescriptor(value, "catalog");
+    const signal = Reflect.getOwnPropertyDescriptor(value, "signal");
+    if (
+      !ref?.enumerable
+      || !Object.hasOwn(ref, "value")
+      || !catalog?.enumerable
+      || !Object.hasOwn(catalog, "value")
+      || (signal !== undefined && (!signal.enumerable || !Object.hasOwn(signal, "value")))
+    ) {
+      throw new TypeError();
+    }
+    return Object.freeze({
+      ref: ref.value as ShaderStyleProfileRef,
+      catalog: catalog.value as PromotedShaderCatalogResolver,
+      ...(signal === undefined ? {} : { signal: signal.value as AbortSignal | undefined }),
+    });
+  } catch {
+    throw catalogFailure("Style profile load request must use enumerable own data properties.");
+  }
+}
+
+function referenceObject(value: unknown, keys: readonly string[], label: string): Record<string, string> {
+  let snapshot: unknown;
+  try {
+    snapshot = snapshotGpuContract(value);
+  } catch {
+    throw catalogFailure(`${label} must contain bounded detached JSON contract data.`);
+  }
+  if (typeof snapshot !== "object" || snapshot === null || Array.isArray(snapshot)) {
+    throw catalogFailure(`${label} must be an object.`);
+  }
+  const record = snapshot as Readonly<Record<string, unknown>>;
+  const actual = Object.keys(record);
+  if (actual.some((key) => !keys.includes(key)) || keys.some((key) => !Object.hasOwn(record, key))
+    || actual.some((key) => typeof record[key] !== "string")) {
+    throw catalogFailure(`${label} has unknown, missing, or non-string fields.`);
+  }
+  return record as Record<string, string>;
 }
 
 function snapshotProfileRef(ref: ShaderStyleProfileRef): ShaderStyleProfileRef {
-  const profileId = ref.profileId;
-  const version = ref.version;
-  const manifestUri = ref.manifestUri;
-  const manifestSha256 = ref.manifestSha256;
+  const value = referenceObject(ref, ["profileId", "version", "manifestUri", "manifestSha256"], "Style profile reference");
+  const profileId = value.profileId!;
+  const version = value.version!;
+  const manifestUri = value.manifestUri!;
+  const manifestSha256 = value.manifestSha256! as ShaderStyleProfileRef["manifestSha256"];
   return Object.freeze({ profileId, version, manifestUri, manifestSha256 });
 }
 
 function snapshotShaderRef(ref: ShaderVersionRef): ShaderVersionRef {
-  const shaderId = ref.shaderId;
-  const version = ref.version;
-  const manifestUri = ref.manifestUri;
-  const manifestSha256 = ref.manifestSha256;
+  const value = referenceObject(ref, ["shaderId", "version", "manifestUri", "manifestSha256"], "Shader version reference");
+  const shaderId = value.shaderId!;
+  const version = value.version!;
+  const manifestUri = value.manifestUri!;
+  const manifestSha256 = value.manifestSha256! as ShaderVersionRef["manifestSha256"];
   return Object.freeze({ shaderId, version, manifestUri, manifestSha256 });
 }
 
 function snapshotInterfaceRef(ref: GpuInterfaceRef): GpuInterfaceRef {
-  const interfaceId = ref.interfaceId;
-  const interfaceVersion = ref.interfaceVersion;
-  const manifestUri = ref.manifestUri;
-  const manifestSha256 = ref.manifestSha256;
-  const interfaceAbiHash = ref.interfaceAbiHash;
-  const modelAbiHash = ref.modelAbiHash;
+  const value = referenceObject(ref, ["interfaceId", "interfaceVersion", "manifestUri", "manifestSha256", "interfaceAbiHash", "modelAbiHash"], "GPU interface reference");
+  const interfaceId = value.interfaceId!;
+  const interfaceVersion = value.interfaceVersion!;
+  const manifestUri = value.manifestUri!;
+  const manifestSha256 = value.manifestSha256! as GpuInterfaceRef["manifestSha256"];
+  const interfaceAbiHash = value.interfaceAbiHash! as GpuInterfaceRef["interfaceAbiHash"];
+  const modelAbiHash = value.modelAbiHash! as GpuInterfaceRef["modelAbiHash"];
   return Object.freeze({
     interfaceId,
     interfaceVersion,
@@ -68,8 +234,28 @@ function snapshotInterfaceRef(ref: GpuInterfaceRef): GpuInterfaceRef {
   });
 }
 
+function assertCatalogAssetVersion(value: string, label: string): void {
+  try {
+    assertImmutableAssetVersion(value);
+  } catch {
+    throw catalogFailure(`${label} must use an immutable asset version represented by an exact token.`);
+  }
+}
+
+const ABORTED_GETTER = typeof AbortSignal === "undefined"
+  ? undefined
+  : Reflect.getOwnPropertyDescriptor(AbortSignal.prototype, "aborted")?.get;
+
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new DOMException("Aborted", "AbortError");
+  if (signal === undefined) return;
+  let aborted: unknown;
+  try {
+    if (!ABORTED_GETTER) throw new TypeError();
+    aborted = Reflect.apply(ABORTED_GETTER, signal, []);
+  } catch {
+    throw catalogFailure("Abort signal could not be inspected safely.");
+  }
+  if (aborted === true) throw new DOMException("Aborted", "AbortError");
 }
 
 function exactShaderRefKey(ref: ShaderVersionRef): string {
@@ -108,7 +294,7 @@ function assertDistinctEvidenceOwnership(shaders: readonly LoadedShaderVersion[]
       ] as const) {
         const owner = owners.get(value);
         if (owner !== undefined && owner !== shaderKey) {
-          throw new TypeError(`Distinct shader versions in one style profile reuse the same ${kind}.`);
+          throw catalogFailure(`Distinct shader versions in one style profile reuse the same ${kind}.`);
         }
         owners.set(value, shaderKey);
       }
@@ -142,27 +328,40 @@ async function loadInterface(
   signal?: AbortSignal,
 ) {
   throwIfAborted(signal);
-  assertImmutableAssetVersion(ref.interfaceVersion);
-  if (!catalog.isCatalogAssetUri(ref.manifestUri)) throw new TypeError("GPU interface URI is outside the promoted catalog root.");
-  const loaded = await catalog.loadInterface(ref, signal);
-  const bytes = copyBytes(loaded.bytes);
+  assertCatalogAssetVersion(ref.interfaceVersion, "GPU interface reference");
+  if (!isCatalogAssetUri(catalog, ref.manifestUri)) throw catalogFailure("GPU interface URI is outside the promoted catalog root.");
+  const loaded = await loadCatalogAsset(
+    () => catalog.loadInterface(ref, signal),
+    "GPU interface",
+    GPU_CONTRACT_SNAPSHOT_LIMITS.maximumInputBytes,
+  );
+  const bytes = loaded.bytes;
   const promoted = loaded.promoted;
   throwIfAborted(signal);
-  if (!promoted) throw new TypeError("GPU interface is not promoted.");
+  if (!promoted) throw catalogFailure("GPU interface is not promoted.", "unpromoted-asset");
   await verifyBytes(bytes, ref.manifestSha256, "GPU interface manifest");
-  const manifest = parseGpuInterfaceManifest(parseJsonBytes(bytes, "GPU interface manifest"));
+  const manifest = catalogContractStep(
+    () => parseGpuInterfaceManifest(parseJsonBytes(bytes, "GPU interface manifest")),
+    "GPU interface manifest failed strict contract validation.",
+  );
   if (
     manifest.interfaceId !== ref.interfaceId
     || manifest.interfaceVersion !== ref.interfaceVersion
     || manifest.interfaceAbiHash !== ref.interfaceAbiHash
     || manifest.modelAbiHash !== ref.modelAbiHash
   ) {
-    throw new TypeError("GPU interface manifest identity does not match its exact reference.");
+    throw catalogFailure("GPU interface manifest identity does not match its exact reference.");
   }
-  const modelAbiHash = await computeGpuAbiHash({ kind: "model", interface: manifest });
-  const interfaceAbiHash = await computeGpuAbiHash({ kind: "interface", interface: manifest });
+  const modelAbiHash = await catalogContractStepAsync(
+    () => computeGpuAbiHash({ kind: "model", interface: manifest }),
+    "GPU interface model ABI hash regeneration failed.",
+  );
+  const interfaceAbiHash = await catalogContractStepAsync(
+    () => computeGpuAbiHash({ kind: "interface", interface: manifest }),
+    "GPU interface ABI hash regeneration failed.",
+  );
   if (modelAbiHash !== manifest.modelAbiHash || interfaceAbiHash !== manifest.interfaceAbiHash) {
-    throw new TypeError("GPU interface ABI hashes do not match regenerated structural hashes.");
+    throw catalogFailure("GPU interface ABI hashes do not match regenerated structural hashes.");
   }
   return manifest;
 }
@@ -173,56 +372,77 @@ async function loadShader(
   signal?: AbortSignal,
 ): Promise<LoadedShaderVersion> {
   throwIfAborted(signal);
-  assertImmutableAssetVersion(ref.version);
-  if (!catalog.isCatalogAssetUri(ref.manifestUri)) throw new TypeError("Shader manifest URI is outside the promoted catalog root.");
-  const loaded = await catalog.loadShader(ref, signal);
-  const bytes = copyBytes(loaded.bytes);
+  assertCatalogAssetVersion(ref.version, "Shader reference");
+  if (!isCatalogAssetUri(catalog, ref.manifestUri)) throw catalogFailure("Shader manifest URI is outside the promoted catalog root.");
+  const loaded = await loadCatalogAsset(
+    () => catalog.loadShader(ref, signal),
+    "Shader manifest",
+    GPU_CONTRACT_SNAPSHOT_LIMITS.maximumInputBytes,
+  );
+  const bytes = loaded.bytes;
   const promoted = loaded.promoted;
   throwIfAborted(signal);
-  if (!promoted) throw new TypeError("Shader version is not promoted.");
+  if (!promoted) throw catalogFailure("Shader version is not promoted.", "unpromoted-asset");
   await verifyBytes(bytes, ref.manifestSha256, "Shader manifest");
-  const manifest = parseShaderVersionManifest(parseJsonBytes(bytes, "Shader manifest"));
+  const manifest = catalogContractStep(
+    () => parseShaderVersionManifest(parseJsonBytes(bytes, "Shader manifest")),
+    "Shader manifest failed strict contract validation.",
+  );
   if (manifest.shaderId !== ref.shaderId || manifest.version !== ref.version) {
-    throw new TypeError("Shader manifest identity does not match its exact reference.");
+    throw catalogFailure("Shader manifest identity does not match its exact reference.");
   }
   for (const evidence of [
     manifest.validationEvidence,
     ...manifest.additionalValidationEvidence.map((item) => item.evidence),
   ]) {
-    if (!catalog.isCatalogAssetUri(evidence.uri)) throw new TypeError("Shader validation evidence URI is outside the promoted catalog root.");
-    if (!catalog.isCatalogAssetUri(evidence.attestationRef.uri)) throw new TypeError("Shader validation evidence attestation URI is outside the promoted catalog root.");
+    if (!isCatalogAssetUri(catalog, evidence.uri)) throw catalogFailure("Shader validation evidence URI is outside the promoted catalog root.");
+    if (!isCatalogAssetUri(catalog, evidence.attestationRef.uri)) throw catalogFailure("Shader validation evidence attestation URI is outside the promoted catalog root.");
   }
   const interfaceRef = snapshotInterfaceRef(manifest.gpuInterface);
   const gpuInterface = await loadInterface(catalog, interfaceRef, signal);
   const normalizeModules = (values: readonly { readonly moduleId: string; readonly sha256: string }[]) =>
     [...values].sort((left, right) => left.moduleId < right.moduleId ? -1 : left.moduleId > right.moduleId ? 1 : 0)
       .map(({ moduleId, sha256 }) => ({ moduleId, sha256 }));
-  if (canonicalizeGpuContract(normalizeModules(gpuInterface.modules)) !== canonicalizeGpuContract(normalizeModules(manifest.modules))) {
-    throw new TypeError("Shader modules differ from the exact reflected GPU interface module set.");
+  if (catalogContractStep(
+    () => canonicalizeGpuContract(normalizeModules(gpuInterface.modules))
+      !== canonicalizeGpuContract(normalizeModules(manifest.modules)),
+    "Shader module-set comparison failed.",
+  )) {
+    throw catalogFailure("Shader modules differ from the exact reflected GPU interface module set.");
   }
-  const shaderAbiHash = await computeGpuAbiHash({
-    kind: "shader",
-    interface: gpuInterface,
-    pipelines: manifest.pipelines,
-    requirements: manifest.requirements,
-  });
-  if (shaderAbiHash !== manifest.shaderAbiHash) throw new TypeError("Shader ABI hash differs from regenerated pipeline/interface ABI.");
+  const shaderAbiHash = await catalogContractStepAsync(
+    () => computeGpuAbiHash({
+      kind: "shader",
+      interface: gpuInterface,
+      pipelines: manifest.pipelines,
+      requirements: manifest.requirements,
+    }),
+    "Shader ABI hash regeneration failed.",
+  );
+  if (shaderAbiHash !== manifest.shaderAbiHash) throw catalogFailure("Shader ABI hash differs from regenerated pipeline/interface ABI.");
   const modulePairs = await mapLimit(manifest.modules, 4, async (module) => {
     throwIfAborted(signal);
-    if (!catalog.isCatalogAssetUri(module.uri)) throw new TypeError(`Shader module ${module.moduleId} URI is outside the promoted catalog root.`);
-    const asset = await catalog.loadModule(ref, module.moduleId, module.uri, signal);
-    const moduleBytes = copyBytes(asset.bytes);
+    if (!isCatalogAssetUri(catalog, module.uri)) throw catalogFailure(`Shader module ${module.moduleId} URI is outside the promoted catalog root.`);
+    const asset = await loadCatalogAsset(
+      () => catalog.loadModule(ref, module.moduleId, module.uri, signal),
+      `Shader module ${module.moduleId}`,
+      module.byteLength,
+    );
+    const moduleBytes = asset.bytes;
     const promoted = asset.promoted;
     throwIfAborted(signal);
-    if (!promoted) throw new TypeError(`Shader module ${module.moduleId} is not promoted.`);
+    if (!promoted) throw catalogFailure(`Shader module ${module.moduleId} is not promoted.`, "unpromoted-asset");
     if (moduleBytes.byteLength !== module.byteLength) {
-      throw new TypeError(`Shader module ${module.moduleId} byte length does not match its manifest.`);
+      throw catalogFailure(`Shader module ${module.moduleId} byte length does not match its manifest.`);
     }
     await verifyBytes(moduleBytes, module.sha256, `Shader module ${module.moduleId}`);
     return [module.moduleId, moduleBytes] as const;
   }, signal);
   const decoder = new TextDecoder("utf-8", { fatal: true });
-  validateShaderDerivedRequirements({ manifest, gpuInterface, moduleSources: new Map(modulePairs.map(([moduleId, bytes]) => [moduleId, decoder.decode(bytes)])) });
+  catalogContractStep(
+    () => validateShaderDerivedRequirements({ manifest, gpuInterface, moduleSources: new Map(modulePairs.map(([moduleId, bytes]) => [moduleId, decoder.decode(bytes)])) }),
+    "Shader source requirement validation failed.",
+  );
   return { ref, manifest, gpuInterface, modules: new Map(modulePairs) };
 }
 
@@ -232,21 +452,30 @@ export async function loadShaderStyleProfile(input: {
   readonly catalog: PromotedShaderCatalogResolver;
   readonly signal?: AbortSignal;
 }): Promise<ShaderResult<LoadedShaderStyleProfile>> {
-  const signal = input.signal;
   try {
+    const request = inspectLoadRequest(input);
+    const signal = request.signal;
+    const catalog = request.catalog;
     throwIfAborted(signal);
-    const ref = snapshotProfileRef(input.ref);
-    assertImmutableAssetVersion(ref.version);
-    if (!input.catalog.isCatalogAssetUri(ref.manifestUri)) throw new TypeError("Style profile URI is outside the promoted catalog root.");
-    const loaded = await input.catalog.loadProfile(ref, signal);
-    const profileBytes = copyBytes(loaded.bytes);
+    const ref = snapshotProfileRef(request.ref);
+    assertCatalogAssetVersion(ref.version, "Style profile reference");
+    if (!isCatalogAssetUri(catalog, ref.manifestUri)) throw catalogFailure("Style profile URI is outside the promoted catalog root.");
+    const loaded = await loadCatalogAsset(
+      () => catalog.loadProfile(ref, signal),
+      "Style profile",
+      GPU_CONTRACT_SNAPSHOT_LIMITS.maximumInputBytes,
+    );
+    const profileBytes = loaded.bytes;
     const promoted = loaded.promoted;
     throwIfAborted(signal);
     if (!promoted) {
       return { ok: false, diagnostics: [diagnostic("unpromoted-asset", "Style profile is not promoted.")] };
     }
     await verifyBytes(profileBytes, ref.manifestSha256, "Style profile manifest");
-    const manifest = parseShaderStyleProfileManifest(parseJsonBytes(profileBytes, "Style profile manifest"));
+    const manifest = catalogContractStep(
+      () => parseShaderStyleProfileManifest(parseJsonBytes(profileBytes, "Style profile manifest")),
+      "Style profile manifest failed strict contract validation.",
+    );
     if (manifest.profileId !== ref.profileId || manifest.version !== ref.version) {
       return { ok: false, diagnostics: [diagnostic("invalid-contract", "Style profile identity does not match its exact reference.")] };
     }
@@ -257,12 +486,12 @@ export async function loadShaderStyleProfile(input: {
       const cacheKey = exactShaderRefKey(shaderRef);
       let shader = cache.get(cacheKey);
       if (!shader) {
-        shader = loadShader(input.catalog, shaderRef, signal);
+        shader = loadShader(catalog, shaderRef, signal);
         cache.set(cacheKey, shader);
       }
       const resolved = await shader;
       if (!resolved.manifest.renderRoles.some((role) => role.role === binding.role)) {
-        throw new TypeError(`Shader ${resolved.manifest.shaderId} does not implement role ${binding.role}.`);
+        throw catalogFailure(`Shader ${resolved.manifest.shaderId} does not implement role ${binding.role}.`);
       }
       const validationScopes = new Map(
         resolved.manifest.additionalValidationEvidence.map((item) => [item.scope, item.evidence]),
@@ -270,14 +499,14 @@ export async function loadShaderStyleProfile(input: {
       for (const requirement of manifest.requiredValidationScopes) {
         const evidence = validationScopes.get(requirement.scope);
         if (!evidence) {
-          throw new TypeError(`Shader ${resolved.manifest.shaderId} lacks required validation scope ${requirement.scope}.`);
+          throw catalogFailure(`Shader ${resolved.manifest.shaderId} lacks required validation scope ${requirement.scope}.`);
         }
         if (
           evidence.matrixId !== requirement.matrixId
           || evidence.matrixVersion !== requirement.matrixVersion
           || evidence.matrixSha256 !== requirement.matrixSha256
         ) {
-          throw new TypeError(
+          throw catalogFailure(
             `Shader ${resolved.manifest.shaderId} validation scope ${requirement.scope} is bound to a different matrix policy.`,
           );
         }
@@ -294,13 +523,14 @@ export async function loadShaderStyleProfile(input: {
       }),
     };
   } catch (cause) {
-    if (signal?.aborted) throw cause;
-    const code = cause instanceof TypeError && /digest/u.test(cause.message)
-      ? "digest-mismatch"
-      : "invalid-contract";
+    if (cause instanceof DOMException && cause.name === "AbortError") throw cause;
+    const known = cause instanceof CatalogLoadError ? cause : undefined;
     return {
       ok: false,
-      diagnostics: [diagnostic(code, cause instanceof Error ? cause.message : "Style profile loading failed.")],
+      diagnostics: [diagnostic(
+        known?.diagnosticCode ?? "invalid-contract",
+        known?.message ?? "Style profile loading failed.",
+      )],
     };
   }
 }

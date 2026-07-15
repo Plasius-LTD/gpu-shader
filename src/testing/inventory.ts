@@ -6,7 +6,11 @@ import {
   type ShaderQualificationBundleManifest,
   type ShaderResult,
 } from "../contracts.js";
-import { canonicalizeGpuContract } from "../canonical-json.js";
+import {
+  canonicalizeGpuContract,
+  QUALIFICATION_GPU_CONTRACT_SNAPSHOT_LIMITS,
+  snapshotGpuContract,
+} from "../canonical-json.js";
 import { assertImmutableAssetVersion } from "../asset-version.js";
 import { asSha256Hex } from "../hash.js";
 import { parseSerializableGpuPipelineDescriptors } from "../manifest-validation.js";
@@ -31,7 +35,7 @@ function freezeJson<T>(value: T): T {
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const expected = new Set(keys);
-  return Object.keys(value).every((key) => expected.has(key)) && keys.every((key) => key in value);
+  return Object.keys(value).every((key) => expected.has(key)) && keys.every((key) => Object.hasOwn(value, key));
 }
 
 function safeToken(value: unknown): value is string {
@@ -67,13 +71,13 @@ export function validateCompileUnitInventory(
 ): ShaderResult<ShaderCompileUnitInventory> {
   let snapshot: unknown;
   try {
-    snapshot = JSON.parse(canonicalizeGpuContract(value)) as unknown;
-  } catch (cause) {
+    snapshot = snapshotGpuContract(value, QUALIFICATION_GPU_CONTRACT_SNAPSHOT_LIMITS);
+  } catch {
     return {
       ok: false,
       diagnostics: [issue(
         "invalid-contract",
-        cause instanceof Error ? cause.message : "Compile-unit inventory must contain detached JSON data.",
+        "Compile-unit inventory must contain bounded detached JSON contract data.",
       )],
     };
   }
