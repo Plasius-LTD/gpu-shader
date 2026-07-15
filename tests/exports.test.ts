@@ -5,6 +5,7 @@ describe("public subpath boundaries", () => {
   it("keeps the root entry browser-safe while exporting runtime contracts", async () => {
     const root = await import("../src/index.js");
     expect(root).toEqual(expect.objectContaining({
+      assertImmutableAssetVersion: expect.any(Function),
       canonicalizeGpuContract: expect.any(Function),
       computeGpuAbiHash: expect.any(Function),
       createGpuRecordCodec: expect.any(Function),

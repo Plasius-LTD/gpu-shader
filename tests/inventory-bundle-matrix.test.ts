@@ -108,6 +108,32 @@ describe("compile-unit inventory", () => {
     extra.manualLayout = { offset: 0 };
     expect(validateCompileUnitInventory(extra).ok).toBe(false);
   });
+
+  it("rejects mutable GPU-interface versions before compile-unit qualification", () => {
+    const inventory = clone(validInventory());
+    (inventory.compileUnits[0]!.interfaceRef as Mutable<typeof inventory.compileUnits[number]["interfaceRef"]>).interfaceVersion = "latest";
+    expect(validateCompileUnitInventory(inventory).ok).toBe(false);
+  });
+
+  it("detaches and freezes a validated GPU-interface version accessor", () => {
+    const inventory = clone(validInventory());
+    const ref = inventory.compileUnits[0]!.interfaceRef as Mutable<typeof inventory.compileUnits[number]["interfaceRef"]>;
+    const exact = ref.interfaceVersion;
+    let reads = 0;
+    Object.defineProperty(ref, "interfaceVersion", {
+      configurable: true,
+      enumerable: true,
+      get: () => reads++ === 0 ? exact : "latest",
+    });
+
+    const result = validateCompileUnitInventory(inventory);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.compileUnits[0]!.interfaceRef.interfaceVersion).toBe(exact);
+      expect(Object.isFrozen(result.value.compileUnits[0]!.interfaceRef)).toBe(true);
+    }
+    expect(reads).toBe(1);
+  });
 });
 
 describe("declarative qualification fixture", () => {
@@ -205,6 +231,34 @@ describe("qualification bundle closure", () => {
       { moduleId: "extra", sha256: ZERO_SHA },
     ];
     expect(validateQualificationBundleManifest(subjectExtra).ok).toBe(false);
+  });
+
+  it("rejects a mutable shader subject version at the bundle boundary", async () => {
+    const bundle = await qualificationBundle(await stableMatrix());
+    (bundle.subject.shaderManifestCore as Mutable<typeof bundle.subject.shaderManifestCore>).version = "1.x";
+    const result = validateQualificationBundleManifest(bundle);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.diagnostics[0]?.message).toMatch(/immutable asset version.*exact token/iu);
+  });
+
+  it("detaches and freezes a validated shader subject version accessor", async () => {
+    const bundle = await qualificationBundle(await stableMatrix());
+    const subject = bundle.subject.shaderManifestCore as Mutable<typeof bundle.subject.shaderManifestCore>;
+    const exact = subject.version;
+    let reads = 0;
+    Object.defineProperty(subject, "version", {
+      configurable: true,
+      enumerable: true,
+      get: () => reads++ === 0 ? exact : "latest",
+    });
+
+    const result = validateQualificationBundleManifest(bundle);
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.value.subject.shaderManifestCore.version).toBe(exact);
+      expect(Object.isFrozen(result.value.subject.shaderManifestCore)).toBe(true);
+    }
+    expect(reads).toBe(1);
   });
 
   it("rejects stale fixtures, unsafe manifest paths and incomplete matrix cell claims", async () => {

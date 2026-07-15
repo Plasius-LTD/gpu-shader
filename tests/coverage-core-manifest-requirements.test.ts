@@ -390,6 +390,18 @@ describe("strict reflected record boundaries", () => {
       model: assets.model,
     };
     expect(parseShaderQualificationModelCompatibilityFixture(fixture)).toEqual(fixture);
+    const accessorFixture = clone(fixture);
+    const exact = accessorFixture.model.version;
+    let reads = 0;
+    Object.defineProperty(accessorFixture.model, "version", {
+      configurable: true,
+      enumerable: true,
+      get: () => reads++ === 0 ? exact : "latest",
+    });
+    const detached = parseShaderQualificationModelCompatibilityFixture(accessorFixture);
+    expect(detached.model.version).toBe(exact);
+    expect(reads).toBe(1);
+    expect(Object.isFrozen(detached.model)).toBe(true);
     expect(() => parseShaderQualificationModelCompatibilityFixture({
       ...fixture,
       contractVersion: "2.0.0",

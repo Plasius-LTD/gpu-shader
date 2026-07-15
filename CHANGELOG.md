@@ -10,16 +10,26 @@ not manually create a versioned release section.
 ## [Unreleased]
 
 - **Added**
-  - (placeholder)
+  - A browser-safe `assertImmutableAssetVersion` contract shared by direct
+    runtime loaders and strict GPU manifest parsers.
 
 - **Changed**
   - (placeholder)
 
 - **Fixed**
-  - (placeholder)
+  - Model, GPU-interface, shader, and style-profile manifests and references
+    now reject mutable aliases, ranges, wildcards, URLs, and path syntax before
+    catalog access.
+  - Strict manifest, compile-unit, and qualification parsers now validate and
+    return detached frozen JSON snapshots, preventing accessor/prototype
+    mutation between validation and use.
 
 - **Security**
-  - (placeholder)
+  - Browser runtime loading fails closed before invoking a promoted-catalog
+    resolver when a top-level or nested asset reference does not carry an
+    exact immutable version.
+  - Compatibility diagnostics now fail closed on hostile capability access and
+    cap untrusted diagnostic text at 512 Unicode code points.
 
 ## [0.1.1] - 2026-07-13
 
