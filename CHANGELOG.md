@@ -13,6 +13,20 @@ not manually create a versioned release section.
   - (placeholder)
 
 - **Changed**
+  - (placeholder)
+
+- **Fixed**
+  - (placeholder)
+
+- **Security**
+  - (placeholder)
+
+## [0.1.3] - 2026-07-15
+
+- **Added**
+  - (placeholder)
+
+- **Changed**
   - Canonical JSON and ABI hashing now operate on bounded descriptor-only
     snapshots. Runtime/model contracts and full qualification products use
     separate named finite policies; changing those policies requires affected
@@ -176,9 +190,10 @@ not manually create a versioned release section.
 - Codecov uses OIDC and release/maintenance actions are pinned to reviewed
   Node-24-compatible revisions.
 
-[Unreleased]: https://github.com/Plasius-LTD/gpu-shader/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/Plasius-LTD/gpu-shader/compare/v0.1.3...HEAD
 
 
 [0.1.0]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.0
 [0.1.1]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.1
 [0.1.2]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.2
+[0.1.3]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.3
