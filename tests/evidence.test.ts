@@ -553,6 +553,37 @@ describe("trusted workflow provenance and external attestation", () => {
       bundleBytes,
       verifyCryptographicBundle: async () => false,
     })).ok).toBe(false);
+
+    const secret = "cryptographic-provider-secret-77cb";
+    const rejected = await verifyShaderValidationEvidenceAttestation({
+      ref,
+      evidenceBytes,
+      bundleBytes,
+      verifyCryptographicBundle: async () => { throw new Error(secret); },
+    });
+    expect(rejected.ok).toBe(false);
+    expect(JSON.stringify(rejected)).not.toContain(secret);
+    if (!rejected.ok) {
+      expect(rejected.diagnostics[0]?.message).toBe(
+        "External build-provenance cryptographic verification failed.",
+      );
+    }
+
+    let verifierReads = 0;
+    const hostileRequest = { ref, evidenceBytes, bundleBytes } as Parameters<
+      typeof verifyShaderValidationEvidenceAttestation
+    >[0];
+    Object.defineProperty(hostileRequest, "verifyCryptographicBundle", {
+      enumerable: true,
+      get() {
+        verifierReads += 1;
+        throw new Error(secret);
+      },
+    });
+    const hostileResult = await verifyShaderValidationEvidenceAttestation(hostileRequest);
+    expect(hostileResult.ok).toBe(false);
+    expect(verifierReads).toBe(0);
+    expect(JSON.stringify(hostileResult)).not.toContain(secret);
   });
 
   it("rejects post-aggregate automation-driver mutation against the attested evidence digest", async () => {

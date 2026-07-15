@@ -75,6 +75,16 @@ Verify fixed code-unit key ordering, deterministic tuple ordering, rejection of
 cycles/unsupported/non-finite JSON, SHA-256 format, model projection isolation,
 full interface sensitivity and locale independence.
 
+Exercise the bounded own-data snapshot before every parser family. Returning
+and throwing nested accessors must be rejected with zero reads. Proxy `get`
+traps must not run; unavoidable prototype/key/descriptor traps must produce a
+constant diagnostic with no raw message or cause. Cover sparse and custom
+arrays, symbols, non-enumerable fields, behavioral prototypes, revoked Proxies,
+cycles, shared acyclic objects, invalid Unicode, depth/nodes/properties/elements,
+single and aggregate string bytes, aggregate canonical bytes, encoded-input
+bytes, and oversized/deep unknown fields. Assert valid plain JSON preserves
+byte-identical JCS and ABI hashes.
+
 ### Generated artifacts and codecs
 
 Verify generated manifest/type/constants/codec text is deterministic. Test

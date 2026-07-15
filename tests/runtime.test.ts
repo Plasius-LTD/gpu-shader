@@ -127,9 +127,11 @@ describe("model/shader compatibility", () => {
 
   it("returns bounded invalid-contract diagnostics for hostile contract and capability accessors", async () => {
     const assets = await shaderAssets();
+    const secret = "capabilities-provider-secret";
+    let reads = 0;
     const capabilitiesWithGetter = {} as ReturnType<typeof capabilities>;
     Object.defineProperties(capabilitiesWithGetter, {
-      features: { enumerable: true, get: () => { throw new Error("capabilities getter exploded"); } },
+      features: { enumerable: true, get: () => { reads += 1; throw new Error(secret); } },
       limits: { enumerable: true, value: {} },
       formats: { enumerable: true, value: [] },
     });
@@ -143,9 +145,10 @@ describe("model/shader compatibility", () => {
     if (!capabilityResult.ok) {
       expect(capabilityResult.diagnostics).toContainEqual(expect.objectContaining({
         code: "invalid-contract",
-        path: "capabilities",
       }));
+      expect(JSON.stringify(capabilityResult.diagnostics)).not.toContain(secret);
     }
+    expect(reads).toBe(0);
 
     const oversized = clone(assets.model) as unknown as Record<string, unknown>;
     oversized["x".repeat(20_000)] = true;
@@ -281,6 +284,102 @@ describe("promoted catalog loading", () => {
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.diagnostics[0]!.code).toBe(expectedCode);
     }
+  });
+
+  it("sanitizes catalog provider failures and rejects accessor-backed asset results without reading them", async () => {
+    const assets = await shaderAssets();
+    const secret = "catalog-provider-secret-4d18";
+    let getterReads = 0;
+    const accessorAsset = {};
+    Object.defineProperties(accessorAsset, {
+      bytes: {
+        enumerable: true,
+        get() {
+          getterReads += 1;
+          throw new Error(secret);
+        },
+      },
+      promoted: { enumerable: true, value: true },
+    });
+    const proxyAsset = new Proxy(
+      { bytes: assets.profileBytes, promoted: true },
+      { ownKeys: () => { throw new Error(secret); } },
+    );
+    const cases: Partial<PromotedShaderCatalogResolver>[] = [
+      { loadProfile: async () => { throw new Error(secret); } },
+      { loadProfile: async () => accessorAsset as never },
+      { loadProfile: async () => proxyAsset },
+      { isCatalogAssetUri: () => { throw new Error(secret); } },
+    ];
+
+    for (const override of cases) {
+      const result = await loadShaderStyleProfile({
+        ref: assets.profileRef,
+        catalog: await promotedCatalog(override),
+      });
+      expect(result.ok).toBe(false);
+      expect(JSON.stringify(result)).not.toContain(secret);
+      if (!result.ok) expect(result.diagnostics[0]?.message).not.toContain(secret);
+    }
+    expect(getterReads).toBe(0);
+
+    let constructorReads = 0;
+    const constructorBytes = new Uint8Array(assets.profileBytes);
+    Object.defineProperty(constructorBytes, "constructor", {
+      configurable: true,
+      get() {
+        constructorReads += 1;
+        throw new Error(secret);
+      },
+    });
+    const accepted = await loadShaderStyleProfile({
+      ref: assets.profileRef,
+      catalog: await promotedCatalog({
+        loadProfile: async () => ({ bytes: constructorBytes, promoted: true }),
+      }),
+    });
+    expect(accepted.ok).toBe(true);
+    expect(constructorReads).toBe(0);
+  });
+
+  it("rejects accessor-backed request envelopes and Proxy signals without property reads or leakage", async () => {
+    const assets = await shaderAssets();
+    const catalog = await promotedCatalog();
+    const secret = "style-load-request-secret-91af";
+    let refReads = 0;
+    const request = { catalog } as {
+      readonly ref: ShaderStyleProfileRef;
+      readonly catalog: PromotedShaderCatalogResolver;
+    };
+    Object.defineProperty(request, "ref", {
+      enumerable: true,
+      get() {
+        refReads += 1;
+        throw new Error(secret);
+      },
+    });
+    const requestResult = await loadShaderStyleProfile(request);
+    expect(requestResult.ok).toBe(false);
+    expect(refReads).toBe(0);
+    expect(JSON.stringify(requestResult)).not.toContain(secret);
+
+    let signalReads = 0;
+    const signalRequest = { ref: assets.profileRef, catalog } as {
+      readonly ref: ShaderStyleProfileRef;
+      readonly catalog: PromotedShaderCatalogResolver;
+      readonly signal?: AbortSignal;
+    };
+    Object.defineProperty(signalRequest, "signal", {
+      enumerable: true,
+      get() {
+        signalReads += 1;
+        throw new Error(secret);
+      },
+    });
+    const signalResult = await loadShaderStyleProfile(signalRequest);
+    expect(signalResult.ok).toBe(false);
+    expect(signalReads).toBe(0);
+    expect(JSON.stringify(signalResult)).not.toContain(secret);
   });
 
   it("rejects arbitrary external URIs even when a resolver returns matching bytes", async () => {

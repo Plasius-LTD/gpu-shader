@@ -115,24 +115,23 @@ describe("compile-unit inventory", () => {
     expect(validateCompileUnitInventory(inventory).ok).toBe(false);
   });
 
-  it("detaches and freezes a validated GPU-interface version accessor", () => {
+  it("rejects a GPU-interface version accessor without invoking it", () => {
     const inventory = clone(validInventory());
     const ref = inventory.compileUnits[0]!.interfaceRef as Mutable<typeof inventory.compileUnits[number]["interfaceRef"]>;
-    const exact = ref.interfaceVersion;
     let reads = 0;
     Object.defineProperty(ref, "interfaceVersion", {
       configurable: true,
       enumerable: true,
-      get: () => reads++ === 0 ? exact : "latest",
+      get: () => {
+        reads += 1;
+        return "1";
+      },
     });
 
     const result = validateCompileUnitInventory(inventory);
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value.compileUnits[0]!.interfaceRef.interfaceVersion).toBe(exact);
-      expect(Object.isFrozen(result.value.compileUnits[0]!.interfaceRef)).toBe(true);
-    }
-    expect(reads).toBe(1);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.diagnostics[0]?.message).toBe("Compile-unit inventory must contain bounded detached JSON contract data.");
+    expect(reads).toBe(0);
   });
 });
 
@@ -241,24 +240,23 @@ describe("qualification bundle closure", () => {
     if (!result.ok) expect(result.diagnostics[0]?.message).toMatch(/immutable asset version.*exact token/iu);
   });
 
-  it("detaches and freezes a validated shader subject version accessor", async () => {
+  it("rejects a shader subject version accessor without invoking it", async () => {
     const bundle = await qualificationBundle(await stableMatrix());
     const subject = bundle.subject.shaderManifestCore as Mutable<typeof bundle.subject.shaderManifestCore>;
-    const exact = subject.version;
     let reads = 0;
     Object.defineProperty(subject, "version", {
       configurable: true,
       enumerable: true,
-      get: () => reads++ === 0 ? exact : "latest",
+      get: () => {
+        reads += 1;
+        return "1";
+      },
     });
 
     const result = validateQualificationBundleManifest(bundle);
-    expect(result.ok).toBe(true);
-    if (result.ok) {
-      expect(result.value.subject.shaderManifestCore.version).toBe(exact);
-      expect(Object.isFrozen(result.value.subject.shaderManifestCore)).toBe(true);
-    }
-    expect(reads).toBe(1);
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.diagnostics[0]?.message).toBe("qualification must contain bounded detached JSON contract data.");
+    expect(reads).toBe(0);
   });
 
   it("rejects stale fixtures, unsafe manifest paths and incomplete matrix cell claims", async () => {
