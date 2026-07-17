@@ -40,7 +40,7 @@ jobs:
 
   validate_and_pack:
     needs: prepare_release
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CD_RUNNER_LABELS || '["self-hosted","Linux","X64"]') }}
     timeout-minutes: 45
     permissions:
       actions: read
@@ -208,6 +208,23 @@ jobs:
           done
 
           echo "LCOV contains all ${#CHANGED_SOURCES[@]} release-changed TypeScript source files."
+
+          echo "LCOV_FILE=${LCOV_FILE}" >> "${GITHUB_ENV}"
+
+      - name: Upload coverage to Codecov (best effort)
+        id: codecov
+        continue-on-error: true
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ${{ env.LCOV_FILE }}
+          flags: unittests
+          fail_ci_if_error: false
+          slug: ${{ github.repository }}
+
+      - name: Report Codecov upload warning
+        if: always() && steps.codecov.outcome == 'failure'
+        run: echo "::warning title=Codecov upload unavailable::Release coverage upload failed or was quota-limited; release validation and publication will continue."
 
       - name: Pack exact immutable npm artifact
         id: package
@@ -387,7 +404,7 @@ jobs:
 
   publish:
     needs: [prepare_release, validate_and_pack]
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CD_RUNNER_LABELS || '["self-hosted","Linux","X64"]') }}
     environment: production
     timeout-minutes: 30
     permissions:
