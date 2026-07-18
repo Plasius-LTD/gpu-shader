@@ -3,20 +3,13 @@ name: CI
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
-
 permissions:
   actions: read
   contents: read
 
-env:
-  FALLBACK_RUNNER_LABEL: ubuntu-latest
-  SELF_HOSTED_RUNNER_LABELS: '["self-hosted","Linux","X64"]'
-
 jobs:
   build-test:
-    runs-on: ${{ fromJSON(github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository && '"ubuntu-latest"' || vars.CI_RUNNER_LABELS || '["self-hosted","Linux","X64"]') }}
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       actions: read
       contents: read
@@ -129,3 +122,27 @@ jobs:
           path: ${{ env.LCOV_FILE }}
           if-no-files-found: error
           retention-days: 1
+
+  codecov:
+    name: Upload coverage to Codecov
+    needs: build-test
+    runs-on: [self-hosted, Linux, X64]
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    steps:
+      - name: Download exact attempt-scoped LCOV artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+        with:
+          name: coverage-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: codecov-coverage
+
+      - name: Upload coverage to Codecov with OIDC
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
+        with:
+          use_oidc: true
+          files: codecov-coverage/lcov.info
+          flags: unittests
+          fail_ci_if_error: true
+          slug: ${{ github.repository }}
