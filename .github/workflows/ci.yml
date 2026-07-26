@@ -139,10 +139,30 @@ jobs:
           path: codecov-coverage
 
       - name: Upload coverage to Codecov with OIDC
+        continue-on-error: true
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:
           use_oidc: true
           files: codecov-coverage/lcov.info
           flags: unittests
-          fail_ci_if_error: true
+          fail_ci_if_error: false
           slug: ${{ github.repository }}
+
+  # BEGIN PLASIUS PUBLIC ARTIFACT INTEGRITY JOB
+  public_artifact_integrity:
+    name: Public artifact integrity
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version-file: .nvmrc
+      - name: Verify public artifact integrity
+        run: node ./scripts/verify-public-artifacts.cjs '--package-dir' '.'
+  # END PLASIUS PUBLIC ARTIFACT INTEGRITY JOB

@@ -367,6 +367,7 @@ describe("npm release provenance verification", () => {
 describe("release workflow policy", () => {
   const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   const cd = readFileSync(new URL("../.github/workflows/cd.yml", import.meta.url), "utf8");
+  const nodeVersion = readFileSync(new URL("../.nvmrc", import.meta.url), "utf8").trim();
   const prepare = readFileSync(
     new URL("../.github/workflows/release-prepare.yml", import.meta.url),
     "utf8",
@@ -401,9 +402,10 @@ describe("release workflow policy", () => {
       "ref: ${{ needs.prepare.outputs.validation_commit_sha }}",
     );
     expect(resolveRelease).toContain("persist-credentials: false");
-    expect(resolveRelease).toContain("node-version: '24.13.0'");
-    expect(prepare).not.toContain("node-version-file:");
-    expect(prepare.match(/node-version: '24[.]13[.]0'/gu)).toHaveLength(2);
+    expect(nodeVersion).toBe("24.18.0");
+    expect(resolveRelease).toContain('node-version-file: ".nvmrc"');
+    expect(prepare).not.toMatch(/node-version:\s*['"]24[.]/u);
+    expect(prepare.match(/node-version-file: "[.]nvmrc"/gu)).toHaveLength(2);
     expect(resolveRelease).not.toContain("GH_TOKEN");
     expect(resolveRelease).not.toContain("RELEASE_PREP_AUTH_TOKEN");
     expectReadOnlyWorkflowPermissions(
@@ -442,8 +444,9 @@ describe("release workflow policy", () => {
     );
     expect(validate).toContain('if [ "${ACTUAL_SHA}" != "${RELEASE_SHA}" ]; then');
     expect(validate).toContain("Wait for successful CI on exact validation commit");
-    expect(validate).toContain('node-version: "24.13.0"');
-    expect(validate).not.toContain("node-version-file:");
+    expect(nodeVersion).toBe("24.18.0");
+    expect(validate).toContain('node-version-file: ".nvmrc"');
+    expect(validate).not.toMatch(/node-version:\s*['"]24[.]/u);
     expect(validate).toContain("npm ci");
     expect(validate).toContain("npm run lint");
     expect(validate).toContain("npm run typecheck");
