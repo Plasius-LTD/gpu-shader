@@ -6,12 +6,34 @@ let workflow = "";
 let topLevel = "";
 let buildTest = "";
 let codecov = "";
+let publicArtifactIntegrity = "";
+
+function workflowJob(source: string, name: string): string {
+  const prefix = `  ${name}:`;
+  const lines = source.split(/\r?\n/u);
+  const start = lines.findIndex((line) => line === prefix);
+  if (start < 0) throw new Error(`Workflow job not found: ${name}`);
+
+  let end = start + 1;
+  while (end < lines.length) {
+    const line = lines[end] ?? "";
+    if (line.trim().length === 0 || line.trimStart().startsWith("#")) {
+      end += 1;
+      continue;
+    }
+    const leadingSpaces = /^ */u.exec(line)?.[0].length ?? 0;
+    if (leadingSpaces <= 2) break;
+    end += 1;
+  }
+  return lines.slice(start, end).join("\n");
+}
 
 beforeAll(async () => {
   workflow = await readFile(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
   topLevel = workflow.slice(0, workflow.indexOf("\njobs:\n"));
-  buildTest = workflow.slice(workflow.indexOf("\n  build-test:\n"), workflow.indexOf("\n  codecov:\n"));
-  codecov = workflow.slice(workflow.indexOf("\n  codecov:\n"));
+  buildTest = workflowJob(workflow, "build-test");
+  codecov = workflowJob(workflow, "codecov");
+  publicArtifactIntegrity = workflowJob(workflow, "public_artifact_integrity");
 });
 
 describe("CI Codecov OIDC isolation policy", () => {
@@ -48,5 +70,11 @@ describe("CI Codecov OIDC isolation policy", () => {
     expect(codecov).not.toContain("actions/setup-node@");
     expect(codecov).not.toMatch(/^\s+run:/mu);
     expect(codecov).not.toContain("npm ");
+  });
+
+  it("keeps the public artifact gate read-only and outside the OIDC job", () => {
+    expect(publicArtifactIntegrity).toContain("contents: read");
+    expect(publicArtifactIntegrity).not.toContain("id-token:");
+    expect(publicArtifactIntegrity).toContain("scripts/verify-public-artifacts.cjs");
   });
 });
