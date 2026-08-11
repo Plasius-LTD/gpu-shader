@@ -9,6 +9,10 @@ first contribution, sign the appropriate [Contributor License Agreement](legal/C
 Report vulnerabilities privately through [SECURITY.md](SECURITY.md), never in a
 public issue or pull request.
 
+Signed agreements and contributor acceptance records are retained only in the
+approved access-controlled system. Do not add them to source control, an npm
+package, issues, pull requests, or build logs.
+
 ## Before implementation
 
 Search existing issues first. Non-trivial work must be represented in the
@@ -36,6 +40,8 @@ Use Node.js 24 from `.nvmrc` and npm:
 npm ci
 npm run lint
 npm run typecheck
+npm run privacy:check
+npm run test:privacy
 npm run build
 npm run test:coverage
 npm run shader:matrix

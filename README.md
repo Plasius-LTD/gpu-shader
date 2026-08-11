@@ -87,6 +87,38 @@ Do not publish from a local machine. Releases are produced only by
 `.github/workflows/cd.yml` from `main` through the protected `production`
 environment.
 
+### Private-artifact policy
+
+Signed contributor agreements and contributor acceptance records are retained
+only in an approved access-controlled system outside source control. The
+zero-dependency policy gate inspects path metadata only; it never opens or
+hashes suspected private artifacts.
+
+Run the repository and package gates before review or release:
+
+```bash
+npm run privacy:check
+npm run test:privacy
+npm run build
+npm run pack:check
+```
+
+`privacy:check` checks both filesystem paths and the proposed Git index state.
+It rejects CSV files, contributor/CLA registry variants, signed-CLA storage
+directories, and paths that combine a privacy marker with a registry marker. A
+missing, invalid, or unavailable Git worktree/index fails closed. An unstaged
+deletion therefore remains a failure until the deletion is part of the proposed
+commit.
+
+`pack:check` requires the exact `dist` and `matrices` entries in
+`package.json.files`, rejects broad entries, and verifies the normalized
+`npm pack --dry-run` manifest against this package's exact public path
+allowlist. Build-output path changes must update that allowlist through review.
+The temporary npm cache is removed whether the gate passes or fails. CI,
+release preparation, CD validation, and `prepublishOnly` all fail closed on a
+policy violation. These targeted path rules are defense in depth and do not
+replace organisation-wide secret scanning or incident-response controls.
+
 ### Release controls
 
 Release preparation always opens a short-lived `release/v*` pull request with

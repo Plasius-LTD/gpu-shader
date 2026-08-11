@@ -156,6 +156,9 @@ jobs:
           node-version: "24.13.0"
           cache: npm
 
+      - name: Verify private artifact policy
+        run: npm run privacy:check
+
       - name: Install dependencies
         run: npm ci
 

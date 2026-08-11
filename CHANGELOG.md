@@ -19,7 +19,12 @@ not manually create a versioned release section.
   - (placeholder)
 
 - **Security**
-  - (placeholder)
+  - Added zero-dependency, path-only repository and npm-package gates that
+    prevent CSVs, contributor registries, signed CLA artifacts, and private
+    registry variants from entering source control or release artifacts without
+    inspecting file contents. Package publication now also requires the exact
+    `dist` and `matrices` files entries and an exact final tarball-path
+    allowlist.
 
 ## [0.1.3] - 2026-07-15
 

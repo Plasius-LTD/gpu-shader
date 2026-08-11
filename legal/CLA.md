@@ -15,9 +15,10 @@ To protect the intellectual property of this project and ensure clarity of right
 
 ## Registry
 
-Signed CLA records are held privately by Plasius LTD. The committed
-`CLA-REGISTRY.csv` contains only the registry schema and must not contain
-personal details, signatures, or approval records.
+Signed agreements and acceptance records are stored in an access-controlled
+system outside source control. They must never be committed to a repository,
+included in a package, or copied into issues, pull requests, build logs, or
+other public artifacts.
 
 ## Questions?
 
