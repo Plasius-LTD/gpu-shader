@@ -554,7 +554,9 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: ".nvmrc"
-          registry-url: "https://registry.npmjs.org"
+
+      - name: Install pinned npm release client
+        run: npm install --global npm@11.6.2 --ignore-scripts --registry https://registry.npmjs.org
 
       - name: Verify release runtime
         run: |
@@ -799,6 +801,24 @@ jobs:
             }
             core.info(`Preflight accepted npm=${registryPublished ? "published" : "absent"}, tag=${tagTarget || "missing"}, release=${release ? (release.draft ? "draft" : "published") : "missing"}.`);
 
+      - name: Revalidate exact main immediately before release mutation
+        env:
+          EXPECTED_SHA: ${{ needs.prepare_release.outputs.validation_commit_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "${WORKFLOW_SHA}" != "${EXPECTED_SHA}" ]; then
+            echo "Workflow commit ${WORKFLOW_SHA} differs from ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
+          git fetch origin main --no-tags
+          REMOTE_MAIN="$(git rev-parse refs/remotes/origin/main)"
+          if [ "${REMOTE_MAIN}" != "${EXPECTED_SHA}" ]; then
+            echo "main moved to ${REMOTE_MAIN}; refusing release mutation for ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
+
       - name: Attest exact npm tarball
         if: steps.registry.outputs.published != 'true'
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
@@ -930,6 +950,25 @@ jobs:
               headers: { "content-type": "application/json", "content-length": data.length },
             })).data;
             if (String(uploaded.digest || "").replace(/^sha256:/, "") !== sbomSha256) throw new Error("Uploaded release SBOM digest differs from the transported SBOM.");
+
+      - name: Revalidate exact main immediately before npm publication
+        if: steps.registry.outputs.published != 'true'
+        env:
+          EXPECTED_SHA: ${{ needs.prepare_release.outputs.validation_commit_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "${WORKFLOW_SHA}" != "${EXPECTED_SHA}" ]; then
+            echo "Workflow commit ${WORKFLOW_SHA} differs from ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
+          git fetch origin main --no-tags
+          REMOTE_MAIN="$(git rev-parse refs/remotes/origin/main)"
+          if [ "${REMOTE_MAIN}" != "${EXPECTED_SHA}" ]; then
+            echo "main moved to ${REMOTE_MAIN}; refusing npm publication for ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
 
       - name: Publish or recover exact package artifact
         env:

@@ -72,18 +72,17 @@ independent pull-request approval, add an independent production reviewer, and
 prohibit deployment self-review. Review the membership condition whenever
 repository governance is audited.
 
-Codecov uses GitHub OIDC and requires no `CODECOV_TOKEN`. `NPM_TOKEN` is a
-temporary production-environment secret only for the initial public package
-version. After that version exists, configure npm trusted publishing with:
+Codecov uses GitHub OIDC and requires no `CODECOV_TOKEN`. npm publication uses
+trusted publishing with:
 
 - organization/user: `Plasius-LTD`;
 - repository: `gpu-shader`;
 - workflow filename: `cd.yml`; and
 - GitHub environment: `production`.
 
-Then remove `NPM_TOKEN`; subsequent publication uses short-lived npm OIDC.
-For an interrupted initial release, keep the token only until the exact version
-has been verified and the GitHub release is no longer a draft.
+Do not store a reusable npm write token. Publication uses short-lived npm OIDC
+only after the immutable package artifact has passed the unprivileged
+validation job.
 
 The runner-selector credential needs only the runner inventory permissions
 required by preflight. Azure OIDC needs read-only access to the immutable

@@ -130,11 +130,9 @@ npm SLSA provenance for the immutable release commit and protected-main
 non-draft release point to that release commit. Recovery does not create new
 tarball or SBOM attestations under the newer validation commit.
 
-The first public version requires the production-environment `NPM_TOKEN`
-because npm trusted publishing cannot be configured until the package exists.
-After that version is published, configure npm trusted publishing for
-`Plasius-LTD/gpu-shader`, workflow `cd.yml`, environment `production`, and
-remove `NPM_TOKEN`. See the
+Publication uses npm trusted publishing for `Plasius-LTD/gpu-shader`, workflow
+`cd.yml`, and environment `production`; no reusable npm write token is stored.
+See the
 [fleet and repository setup runbook](docs/operations/physical-fleet-readiness.md#repository-configuration).
 
 ## Reflect final assembled WGSL
