@@ -17,10 +17,13 @@ not manually create a versioned release section.
   - (placeholder)
 
 - **Fixed**
+  - Added exact-commit CI dispatch and disabled package-manager cache finalization in both hosted Node.js jobs.
   - (placeholder)
 
 - **Security**
-  - Removed the npm write-token path, added a fail-closed npm 11.5.1-or-newer OIDC guard, and denied fork PR code access to self-hosted CI.
+  - Removed the npm write-token path, added a fail-closed npm 11.5.1-or-newer OIDC guard, and denied fork PR code access to reviewed CI.
+  - Pinned patched transitive npm dependencies to clear the current audit baseline.
+  - Moved reviewed CI to explicit GitHub-hosted runners and pinned the npm OIDC release client to 11.6.2.
   - Added fail-closed source and npm-package admission for the administrative contributor registry and pinned the CI/CD runtime to Node.js 24.18.0 LTS.
   - (placeholder)
 

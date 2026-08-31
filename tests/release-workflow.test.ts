@@ -22,14 +22,21 @@ describe("package release trust boundary", () => {
     expect(cdWorkflow).toContain('ACTUAL_NODE%%.*');
     expect(cdWorkflow).toContain('"11.5.1"');
     expect(cdWorkflow).toContain("--provenance");
+    expect(cdWorkflow.match(/npm@11\.6\.2/gu)).toHaveLength(2);
+    expect(cdWorkflow.match(/package-manager-cache: false/gu)).toHaveLength(2);
+    expect(cdWorkflow).toContain("Revalidate exact main immediately before npm publication");
     expect(cdWorkflow).not.toMatch(/NPM_TOKEN|NODE_AUTH_TOKEN/u);
   });
 
   it("keeps same-repository pull-request CI on explicit trusted runners", () => {
+    expect(ciWorkflow).toContain("workflow_dispatch:");
     expect(ciWorkflow).toContain("pull_request:");
-    expect(ciWorkflow).toContain("runs-on: [self-hosted, Linux, X64]");
+    expect(ciWorkflow).toContain("runs-on: ubuntu-latest");
     expect(ciWorkflow).toContain("github.event.pull_request.head.repo.full_name == github.repository");
+    expect(ciWorkflow).not.toMatch(/\n\s+cache:\s*["']?npm["']?/u);
+    expect(ciWorkflow.match(/package-manager-cache: false/gu)).toHaveLength(2);
+    expect(ciWorkflow).not.toContain("self-hosted");
     expect(ciWorkflow).not.toContain("pull_request_target");
-    expect(ciWorkflow).not.toContain("fromJSON(vars.");
+    expect(ciWorkflow).not.toContain("fromJSON(");
   });
 });
