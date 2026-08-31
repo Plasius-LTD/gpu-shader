@@ -46,7 +46,7 @@ describe("trusted qualification adapter routing", () => {
     const metadata = await readTrustedHarnessPackageMetadata();
     expect(metadata.name).toBe("@plasius/gpu-shader");
     expect(metadata.version).toMatch(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u);
-    expect(metadata.playwrightCoreVersion).toBe("1.61.1");
+    expect(metadata.playwrightCoreVersion).toBe("1.62.1");
   });
 
   it("fails closed for every unprovisioned physical route", async () => {

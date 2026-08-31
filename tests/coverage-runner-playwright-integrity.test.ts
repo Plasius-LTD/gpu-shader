@@ -32,7 +32,7 @@ describe("Playwright executable-tree integrity", () => {
     const second = await observePlaywrightAdapterHarness(executable);
 
     expect(first).toEqual(second);
-    expect(first).toMatchObject({ id: "playwright-core", version: "1.61.1" });
+    expect(first).toMatchObject({ id: "playwright-core", version: "1.62.1" });
     expect(first.sha256).toMatch(/^[a-f0-9]{64}$/u);
   });
 

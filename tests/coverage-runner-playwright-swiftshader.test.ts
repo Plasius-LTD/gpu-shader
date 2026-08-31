@@ -8,7 +8,7 @@ const boundary = vi.hoisted(() => ({
   launchError: null as Error | null,
   gotoError: null as Error | null,
   evaluateSetupError: null as Error | null,
-  metadataVersion: "1.61.1",
+  metadataVersion: "1.62.1",
   originUrl: "",
   rootStatus: 0,
   launchOptions: null as unknown,
@@ -116,7 +116,7 @@ beforeEach(() => {
   boundary.launchError = null;
   boundary.gotoError = null;
   boundary.evaluateSetupError = null;
-  boundary.metadataVersion = "1.61.1";
+  boundary.metadataVersion = "1.62.1";
   boundary.originUrl = "";
   boundary.rootStatus = 0;
   boundary.launchOptions = null;
@@ -174,7 +174,7 @@ describe("pinned Playwright SwiftShader adapter", () => {
     expect(adapter.automation).toMatchObject({
       kind: "playwright",
       driver: "playwright-core",
-      version: "1.61.1",
+      version: "1.62.1",
       sha256: "a".repeat(64),
     });
 
@@ -198,7 +198,7 @@ describe("pinned Playwright SwiftShader adapter", () => {
     boundary.metadataVersion = "1.60.0";
     await expect(createPlaywrightSwiftShaderAdapter(cell)).rejects.toThrow(/requires playwright-core/u);
 
-    boundary.metadataVersion = "1.61.1";
+    boundary.metadataVersion = "1.62.1";
     boundary.executablePath = "";
     await expect(createPlaywrightSwiftShaderAdapter(cell)).rejects.toThrow(/Chromium is not installed/u);
 
