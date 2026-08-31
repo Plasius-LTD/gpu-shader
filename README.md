@@ -130,11 +130,9 @@ npm SLSA provenance for the immutable release commit and protected-main
 non-draft release point to that release commit. Recovery does not create new
 tarball or SBOM attestations under the newer validation commit.
 
-The first public version requires the production-environment `NPM_TOKEN`
-because npm trusted publishing cannot be configured until the package exists.
-After that version is published, configure npm trusted publishing for
-`Plasius-LTD/gpu-shader`, workflow `cd.yml`, environment `production`, and
-remove `NPM_TOKEN`. See the
+Publication uses npm trusted publishing for `Plasius-LTD/gpu-shader`, workflow
+`cd.yml`, and environment `production`; no reusable npm write token is stored.
+See the
 [fleet and repository setup runbook](docs/operations/physical-fleet-readiness.md#repository-configuration).
 
 ## Reflect final assembled WGSL
@@ -500,7 +498,10 @@ Apache-2.0. See [LICENSE](LICENSE).
 
 CI keeps the administrative contributor registry outside Git and npm package
 artifacts using exact, case-normalised path checks. CI runs on approved
-self-hosted runners. Release preparation and npm publication use GitHub-hosted
-runners with Node.js 24.18.0 LTS. CD remains disabled until the npm trusted
-publisher binding is verified and the legacy token fallback is removed.
+GitHub-hosted runners for same-repository pull requests and `main`, with
+package-manager cache finalization disabled; fork PR code is denied.
+Publication uses the GitHub-hosted `production` job with Node 24 and a pinned
+npm 11.6.2 client. It is token-free and proceeds only while the prepared SHA
+is the exact `main` head after successful push-triggered CI. Do not dispatch CD
+until the npm trusted-publisher binding is verified.
 <!-- END PLASIUS RELEASE INTEGRITY -->

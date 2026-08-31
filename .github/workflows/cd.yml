@@ -88,6 +88,51 @@ jobs:
             exit 1
           fi
 
+      - name: Enforce exact-main successful CI
+        env:
+          EXPECTED_SHA: ${{ needs.prepare_release.outputs.validation_commit_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "${EXPECTED_SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Release preparation did not return a full validation commit SHA." >&2
+            exit 1
+          fi
+
+          git fetch origin main --no-tags
+          REMOTE_MAIN="$(git rev-parse refs/remotes/origin/main)"
+          if [ "${REMOTE_MAIN}" != "${EXPECTED_SHA}" ]; then
+            echo "main moved from validation commit ${EXPECTED_SHA} to ${REMOTE_MAIN}; refusing publication." >&2
+            exit 1
+          fi
+
+          RUNS="$(
+            gh api -X GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              -f branch=main \
+              -f event=push \
+              -f head_sha="${EXPECTED_SHA}" \
+              -f status=success \
+              -f per_page=100
+          )"
+          MATCHES="$(
+            jq \
+              --arg sha "${EXPECTED_SHA}" \
+              '[.workflow_runs[] | select(
+                .head_sha == $sha and
+                .head_branch == "main" and
+                .event == "push" and
+                .status == "completed" and
+                .conclusion == "success"
+              )] | length' \
+              <<<"${RUNS}"
+          )"
+          if [ "${MATCHES}" -le 0 ]; then
+            echo "No successful main push CI exists for exact validation commit ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
+
       - name: Wait for successful CI on exact validation commit
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -154,7 +199,10 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: ".nvmrc"
-          cache: npm
+          package-manager-cache: false
+
+      - name: Install pinned npm release client
+        run: npm install --global npm@11.6.2 --ignore-scripts --registry https://registry.npmjs.org
 
       - name: Verify private artifact policy
         run: npm run privacy:check
@@ -415,6 +463,53 @@ jobs:
       contents: write
       id-token: write
     steps:
+      - name: Enforce exact-main successful CI
+        env:
+          EXPECTED_SHA: ${{ needs.prepare_release.outputs.validation_commit_sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if ! printf '%s' "${EXPECTED_SHA}" | grep -Eq '^[0-9a-f]{40}$'; then
+            echo "Release preparation did not return a full validation commit SHA." >&2
+            exit 1
+          fi
+
+          git init --quiet
+          git remote add origin "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git"
+          git fetch origin main --no-tags
+          REMOTE_MAIN="$(git rev-parse refs/remotes/origin/main)"
+          if [ "${REMOTE_MAIN}" != "${EXPECTED_SHA}" ]; then
+            echo "main moved from validation commit ${EXPECTED_SHA} to ${REMOTE_MAIN}; refusing publication." >&2
+            exit 1
+          fi
+
+          RUNS="$(
+            gh api -X GET \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs" \
+              -f branch=main \
+              -f event=push \
+              -f head_sha="${EXPECTED_SHA}" \
+              -f status=success \
+              -f per_page=100
+          )"
+          MATCHES="$(
+            jq \
+              --arg sha "${EXPECTED_SHA}" \
+              '[.workflow_runs[] | select(
+                .head_sha == $sha and
+                .head_branch == "main" and
+                .event == "push" and
+                .status == "completed" and
+                .conclusion == "success"
+              )] | length' \
+              <<<"${RUNS}"
+          )"
+          if [ "${MATCHES}" -le 0 ]; then
+            echo "No successful main push CI exists for exact validation commit ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
+
       - name: Verify immutable artifact belongs to this run
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         env:
@@ -462,7 +557,33 @@ jobs:
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version-file: ".nvmrc"
-          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Install pinned npm release client
+        run: npm install --global npm@11.6.2 --ignore-scripts --registry https://registry.npmjs.org
+
+      - name: Verify release runtime
+        run: |
+          set -euo pipefail
+
+          ACTUAL_NODE="$(node --version | sed 's/^v//')"
+          if [ "${ACTUAL_NODE%%.*}" != "24" ]; then
+            echo "Expected Node.js 24, found ${ACTUAL_NODE}." >&2
+            exit 1
+          fi
+
+          ACTUAL_NPM="$(npm --version)"
+          node - "${ACTUAL_NPM}" <<'NODE'
+          const actual = process.argv[2].split(".").map(Number);
+          const minimum = "11.5.1".split(".").map(Number);
+          for (let index = 0; index < 3; index += 1) {
+            if (actual[index] > minimum[index]) process.exit(0);
+            if (actual[index] < minimum[index]) process.exit(1);
+          }
+          process.exit(0);
+          NODE
+
+          echo "Using Node.js ${ACTUAL_NODE} and npm ${ACTUAL_NPM}."
 
       - name: Independently verify release closure
         id: release
@@ -684,6 +805,24 @@ jobs:
             }
             core.info(`Preflight accepted npm=${registryPublished ? "published" : "absent"}, tag=${tagTarget || "missing"}, release=${release ? (release.draft ? "draft" : "published") : "missing"}.`);
 
+      - name: Revalidate exact main immediately before release mutation
+        env:
+          EXPECTED_SHA: ${{ needs.prepare_release.outputs.validation_commit_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "${WORKFLOW_SHA}" != "${EXPECTED_SHA}" ]; then
+            echo "Workflow commit ${WORKFLOW_SHA} differs from ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
+          git fetch origin main --no-tags
+          REMOTE_MAIN="$(git rev-parse refs/remotes/origin/main)"
+          if [ "${REMOTE_MAIN}" != "${EXPECTED_SHA}" ]; then
+            echo "main moved to ${REMOTE_MAIN}; refusing release mutation for ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
+
       - name: Attest exact npm tarball
         if: steps.registry.outputs.published != 'true'
         uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3
@@ -816,9 +955,27 @@ jobs:
             })).data;
             if (String(uploaded.digest || "").replace(/^sha256:/, "") !== sbomSha256) throw new Error("Uploaded release SBOM digest differs from the transported SBOM.");
 
+      - name: Revalidate exact main immediately before npm publication
+        if: steps.registry.outputs.published != 'true'
+        env:
+          EXPECTED_SHA: ${{ needs.prepare_release.outputs.validation_commit_sha }}
+          WORKFLOW_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [ "${WORKFLOW_SHA}" != "${EXPECTED_SHA}" ]; then
+            echo "Workflow commit ${WORKFLOW_SHA} differs from ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
+          git fetch origin main --no-tags
+          REMOTE_MAIN="$(git rev-parse refs/remotes/origin/main)"
+          if [ "${REMOTE_MAIN}" != "${EXPECTED_SHA}" ]; then
+            echo "main moved to ${REMOTE_MAIN}; refusing npm publication for ${EXPECTED_SHA}." >&2
+            exit 1
+          fi
+
       - name: Publish or recover exact package artifact
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_CACHE: ${{ runner.temp }}/npm-release-cache
           FLAGS: ${{ steps.release.outputs.flags }}
           PACKAGE_NAME: ${{ steps.release.outputs.package_name }}
@@ -866,11 +1023,6 @@ jobs:
             sed -n '1,40p' "${PACKAGE_QUERY_ERROR}" >&2
             exit 1
           fi
-          if [ "${PACKAGE_QUERY_STATUS}" -ne 0 ] && [ -z "${NODE_AUTH_TOKEN:-}" ]; then
-            echo "The initial package publication requires NPM_TOKEN." >&2
-            exit 1
-          fi
-
           PUBLISH_FLAGS=()
           case "${FLAGS}" in
             "") ;;
