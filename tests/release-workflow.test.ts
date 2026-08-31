@@ -9,6 +9,9 @@ const ciWorkflow = readWorkflow("ci");
 const packageManifest = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as {
   scripts?: Record<string, string>;
 };
+const publishRuntimeStart = cdWorkflow.indexOf("- name: Use fixed Node.js runtime");
+const publishRuntimeEnd = cdWorkflow.indexOf("- name: Install pinned npm release client", publishRuntimeStart);
+const publishRuntime = cdWorkflow.slice(publishRuntimeStart, publishRuntimeEnd);
 
 describe("package release trust boundary", () => {
   it("exposes the privacy check used by CD", () => {
@@ -16,6 +19,11 @@ describe("package release trust boundary", () => {
       "node scripts/verify-public-artifacts.cjs --source-only",
     );
     expect(cdWorkflow).toContain("run: npm run privacy:check");
+  });
+
+  it("pins publish runtime without requiring a checkout", () => {
+    expect(publishRuntime).toContain('node-version: "24.18.0"');
+    expect(publishRuntime).not.toContain("node-version-file");
   });
 
   it("uses exact-main hosted OIDC publication without write tokens", () => {
