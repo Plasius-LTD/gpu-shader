@@ -16,6 +16,8 @@ not manually create a versioned release section.
   - (placeholder)
 
 - **Fixed**
+  - Restored the source-only privacy-check script required by the approved
+    release workflow and added regression coverage for that package contract.
   - (placeholder)
 
 - **Security**
