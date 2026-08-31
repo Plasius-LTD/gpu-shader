@@ -28,7 +28,7 @@ vi.mock("../src/testing/runner/host.js", () => ({
 vi.mock("../src/testing/runner/playwright-integrity.js", () => ({
   observePlaywrightAdapterHarness: async () => ({
     id: "playwright-core" as const,
-    version: "1.61.1",
+    version: "1.62.1",
     sha256: "a".repeat(64),
   }),
 }));
@@ -136,7 +136,7 @@ describe("hosted SwiftShader runner preflight", () => {
       status: "available",
       runnerLabels: ["ubuntu-24.04"],
       matchedRunners: [{ name: "hosted-runner", labels: ["ubuntu-24.04"] }],
-      adapterHarness: { id: "playwright-core", version: "1.61.1", sha256: "a".repeat(64) },
+      adapterHarness: { id: "playwright-core", version: "1.62.1", sha256: "a".repeat(64) },
       producer: { job: "swiftshader", runner: { environment: "github-hosted", os: "Linux", architecture: "X64" } },
     });
   });
