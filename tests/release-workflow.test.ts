@@ -6,8 +6,18 @@ const readWorkflow = (name: string): string =>
   readFileSync(resolve(process.cwd(), `.github/workflows/${name}.yml`), "utf8");
 const cdWorkflow = readWorkflow("cd");
 const ciWorkflow = readWorkflow("ci");
+const packageManifest = JSON.parse(readFileSync(resolve(process.cwd(), "package.json"), "utf8")) as {
+  scripts?: Record<string, string>;
+};
 
 describe("package release trust boundary", () => {
+  it("exposes the privacy check used by CD", () => {
+    expect(packageManifest.scripts?.["privacy:check"]).toBe(
+      "node scripts/verify-public-artifacts.cjs --source-only",
+    );
+    expect(cdWorkflow).toContain("run: npm run privacy:check");
+  });
+
   it("uses exact-main hosted OIDC publication without write tokens", () => {
     expect(cdWorkflow).toContain("runs-on: ubuntu-latest");
     expect(cdWorkflow).toContain("environment: production");
