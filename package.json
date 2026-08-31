@@ -45,6 +45,7 @@
     "audit:npm": "npm audit --audit-level=high --omit=dev",
     "audit:test": "vitest run --coverage",
     "pack:check": "node scripts/verify-public-package.cjs",
+    "privacy:check": "node scripts/verify-public-artifacts.cjs --source-only",
     "harness:fingerprint": "node scripts/fingerprint-trusted-harness.cjs .",
     "shader:matrix": "npm run build && node dist/cli.js validate-matrix --matrix matrices/stable-webgpu-2026-07-13.json",
     "prepare": "npm run build",
