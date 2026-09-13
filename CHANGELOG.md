@@ -9,6 +9,10 @@ not manually create a versioned release section.
 
 ## [Unreleased]
 
+### Changed
+- Refresh compatible npm dependencies from the registry for the weekly dependency maintenance wave.
+
+
 - **Added**
   - (placeholder)
 
