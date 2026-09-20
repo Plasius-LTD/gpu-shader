@@ -24,6 +24,7 @@ import {
   snapshotUint8Array,
 } from "./canonical-json.js";
 import { assertImmutableAssetVersion } from "./asset-version.js";
+import { wgslIdentifier } from "./wgsl-identifier.js";
 import { asSha256Hex } from "./hash.js";
 import { validatePipelineDerivedRequirements } from "./requirements-validation.js";
 
@@ -62,6 +63,16 @@ function text(value: unknown, path: string, maximum = 512): string {
 function token(value: unknown, path: string): string {
   const result = text(value, path, 160);
   if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]*$/u.test(result) || result.includes("..")) throw new TypeError(`${path} must be a safe token.`);
+  return result;
+}
+
+function nullableIdentifier(value: unknown, path: string): string | null {
+  return value === null ? null : wgslIdentifier(value, path);
+}
+
+function identifierArray(value: unknown, path: string, maximum = 4096): string[] {
+  const result = array(value, path, maximum).map((item, index) => wgslIdentifier(item, `${path}[${index}]`));
+  unique(result, String, path);
   return result;
 }
 
@@ -154,7 +165,7 @@ function typeLayout(value: unknown, path: string, depth = 0): GpuTypeLayout {
     }
   } else if (kind === "record") {
     exact(input, ["kind", "recordName", "alignment", "byteSize"], path);
-    token(input.recordName, `${path}.recordName`);
+    wgslIdentifier(input.recordName, `${path}.recordName`);
     nullableInteger(input.byteSize, `${path}.byteSize`);
   } else {
     integer(input.byteSize, `${path}.byteSize`, 1);
@@ -190,11 +201,11 @@ function typeLayout(value: unknown, path: string, depth = 0): GpuTypeLayout {
 function recordLayout(value: unknown, path: string): GpuRecordLayout {
   const input = object(value, path);
   exact(input, ["name", "alignment", "byteSize", "minimumByteSize", "runtimeArrayMember", "addressSpaces", "members"], path);
-  token(input.name, `${path}.name`);
+  wgslIdentifier(input.name, `${path}.name`);
   integer(input.alignment, `${path}.alignment`, 1);
   nullableInteger(input.byteSize, `${path}.byteSize`);
   integer(input.minimumByteSize, `${path}.minimumByteSize`);
-  nullableToken(input.runtimeArrayMember, `${path}.runtimeArrayMember`);
+  nullableIdentifier(input.runtimeArrayMember, `${path}.runtimeArrayMember`);
   const spaces = array(input.addressSpaces, `${path}.addressSpaces`, 5).map((space, index) =>
     enumeration(space, ["uniform", "storage", "function", "private", "workgroup"] as const, `${path}.addressSpaces[${index}]`));
   unique(spaces, String, `${path}.addressSpaces`);
@@ -205,7 +216,7 @@ function recordLayout(value: unknown, path: string): GpuRecordLayout {
     const memberPath = `${path}.members[${index}]`;
     const member = object(value, memberPath);
     exact(member, ["name", "offset", "alignment", "valueByteSize", "occupiedByteSize", "explicitAlign", "explicitSize", "type"], memberPath);
-    names.push(token(member.name, `${memberPath}.name`));
+    names.push(wgslIdentifier(member.name, `${memberPath}.name`));
     const offset = integer(member.offset, `${memberPath}.offset`);
     const alignment = integer(member.alignment, `${memberPath}.alignment`, 1);
     const valueSize = nullableInteger(member.valueByteSize, `${memberPath}.valueByteSize`);
@@ -254,7 +265,7 @@ function bindingResource(value: unknown, path: string): GpuBindingResourceLayout
     enumeration(input.addressSpace, ["uniform", "storage"] as const, `${path}.addressSpace`);
     enumeration(input.access, ["read", "write", "read_write"] as const, `${path}.access`);
     if (input.addressSpace === "uniform" && input.access !== "read") throw new TypeError(`${path}.access must be read for uniform buffers.`);
-    nullableToken(input.recordName, `${path}.recordName`);
+    nullableIdentifier(input.recordName, `${path}.recordName`);
     integer(input.minimumBindingSize, `${path}.minimumBindingSize`);
   } else if (kind === "sampler") {
     exact(input, ["kind", "samplerType"], path);
@@ -286,7 +297,7 @@ function binding(value: unknown, path: string, coordinates = true): UnknownRecor
     ? ["moduleId", "variableName", "group", "binding", "resource", "visibility"]
     : ["source", "resource", "semantic"], path);
   if (coordinates) {
-    token(input.moduleId, `${path}.moduleId`); token(input.variableName, `${path}.variableName`);
+    token(input.moduleId, `${path}.moduleId`); wgslIdentifier(input.variableName, `${path}.variableName`);
     integer(input.group, `${path}.group`); integer(input.binding, `${path}.binding`);
     visibility(input.visibility, `${path}.visibility`);
   } else {
@@ -301,7 +312,7 @@ function binding(value: unknown, path: string, coordinates = true): UnknownRecor
 function entryIo(value: unknown, path: string): UnknownRecord {
   const input = object(value, path);
   exact(input, ["name", "locationKind", "location", "interpolation", "type"], path);
-  token(input.name, `${path}.name`);
+  wgslIdentifier(input.name, `${path}.name`);
   const kind = enumeration(input.locationKind, ["location", "builtin"] as const, `${path}.locationKind`);
   if (kind === "location") integer(input.location, `${path}.location`); else token(input.location, `${path}.location`);
   if (input.interpolation !== null) token(input.interpolation, `${path}.interpolation`);
@@ -318,7 +329,7 @@ function vertexInput(value: unknown, path: string, model = false): UnknownRecord
     token(input.semantic, `${path}.semantic`);
   } else {
     exact(input, ["pipelineId", "moduleId", "entryPoint", "shaderLocation", "shaderType", "bufferSlot", "format", "offset", "arrayStride", "stepMode", "semantic"], path);
-    token(input.pipelineId, `${path}.pipelineId`); token(input.moduleId, `${path}.moduleId`); token(input.entryPoint, `${path}.entryPoint`);
+    token(input.pipelineId, `${path}.pipelineId`); token(input.moduleId, `${path}.moduleId`); wgslIdentifier(input.entryPoint, `${path}.entryPoint`);
     integer(input.shaderLocation, `${path}.shaderLocation`); typeLayout(input.shaderType, `${path}.shaderType`); integer(input.bufferSlot, `${path}.bufferSlot`);
     nullableToken(input.semantic, `${path}.semantic`);
   }
@@ -332,8 +343,8 @@ function semantic(value: unknown, path: string): UnknownRecord {
   const source = object(input.source, `${path}.source`);
   const kind = enumeration(source.kind, ["record-member", "vertex-attribute", "binding"] as const, `${path}.source.kind`);
   if (kind === "record-member") {
-    exact(source, ["kind", "recordName", "memberPath"], `${path}.source`); token(source.recordName, `${path}.source.recordName`);
-    tokenArray(source.memberPath, `${path}.source.memberPath`, 24);
+    exact(source, ["kind", "recordName", "memberPath"], `${path}.source`); wgslIdentifier(source.recordName, `${path}.source.recordName`);
+    identifierArray(source.memberPath, `${path}.source.memberPath`, 24);
   } else if (kind === "vertex-attribute") {
     exact(source, ["kind", "pipelineId", "shaderLocation"], `${path}.source`); token(source.pipelineId, `${path}.source.pipelineId`); integer(source.shaderLocation, `${path}.source.shaderLocation`);
   } else {
@@ -353,9 +364,9 @@ function interfaceRef(value: unknown, path: string): UnknownRecord {
 function programmable(value: unknown, path: string, moduleIds: ReadonlySet<string>): UnknownRecord {
   const input = object(value, path); exact(input, ["moduleId", "entryPoint", "constants"], path);
   const moduleId = token(input.moduleId, `${path}.moduleId`); if (!moduleIds.has(moduleId)) throw new TypeError(`${path}.moduleId is not in modules.`);
-  token(input.entryPoint, `${path}.entryPoint`);
+  wgslIdentifier(input.entryPoint, `${path}.entryPoint`);
   const constants = object(input.constants, `${path}.constants`);
-  for (const [name, value] of Object.entries(constants)) { token(name, `${path}.constants key`); if (typeof value !== "boolean") finite(value, `${path}.constants.${name}`); }
+  for (const [name, value] of Object.entries(constants)) { if (!/^[0-9]+$/u.test(name)) wgslIdentifier(name, `${path}.constants key`); if (typeof value !== "boolean") finite(value, `${path}.constants.${name}`); }
   return input;
 }
 
@@ -479,16 +490,16 @@ export function parseGpuInterfaceManifest(value: unknown): GpuInterfaceManifest 
   bindingValues.forEach((item, index) => { const path = `GpuInterfaceManifest.bindings[${index}]`; const parsed = binding(item, path); const moduleId = String(parsed.moduleId); if (!moduleSet.has(moduleId)) throw new TypeError(`${path}.moduleId is missing.`); bindingKeys.push(`${moduleId}:${parsed.group}:${parsed.binding}`); const resource = parsed.resource as GpuBindingResourceLayout; if (resource.kind === "buffer" && resource.recordName) { const record = records.get(resource.recordName); if (!record) throw new TypeError(`${path} references missing record.`); if (resource.minimumBindingSize !== reflectedRecordBindingSize(record)) throw new TypeError(`${path}.resource.minimumBindingSize differs from its reflected record.`); if (record.runtimeArrayMember !== null && resource.addressSpace !== "storage") throw new TypeError(`${path} exposes a runtime-sized array outside storage.`); } });
   unique(bindingKeys, String, "GpuInterfaceManifest.bindings"); const bindingSet = new Set(bindingKeys);
   const overrideValues = array(input.overrides, "GpuInterfaceManifest.overrides"); const overrideKeys: string[] = []; const overrideIds: string[] = [];
-  overrideValues.forEach((item, index) => { const path = `GpuInterfaceManifest.overrides[${index}]`; const override = object(item, path); exact(override, ["moduleId", "name", "id", "type", "defaultValue"], path); const moduleId = token(override.moduleId, `${path}.moduleId`); if (!moduleSet.has(moduleId)) throw new TypeError(`${path}.moduleId is missing.`); const name = token(override.name, `${path}.name`); overrideKeys.push(`${moduleId}:${name}`); if (override.id !== null) overrideIds.push(`${moduleId}:${integer(override.id, `${path}.id`)}`); enumeration(override.type, ["bool", "i32", "u32", "f32", "f16"] as const, `${path}.type`); if (override.defaultValue !== null && typeof override.defaultValue !== "boolean") finite(override.defaultValue, `${path}.defaultValue`); });
+  overrideValues.forEach((item, index) => { const path = `GpuInterfaceManifest.overrides[${index}]`; const override = object(item, path); exact(override, ["moduleId", "name", "id", "type", "defaultValue"], path); const moduleId = token(override.moduleId, `${path}.moduleId`); if (!moduleSet.has(moduleId)) throw new TypeError(`${path}.moduleId is missing.`); const name = wgslIdentifier(override.name, `${path}.name`); overrideKeys.push(`${moduleId}:${name}`); if (override.id !== null) overrideIds.push(`${moduleId}:${integer(override.id, `${path}.id`)}`); enumeration(override.type, ["bool", "i32", "u32", "f32", "f16"] as const, `${path}.type`); if (override.defaultValue !== null && typeof override.defaultValue !== "boolean") finite(override.defaultValue, `${path}.defaultValue`); });
   unique(overrideKeys, String, "GpuInterfaceManifest.overrides"); unique(overrideIds, String, "GpuInterfaceManifest.overrides ids"); const overrideSet = new Set(overrideKeys);
   const entryValues = array(input.entryPoints, "GpuInterfaceManifest.entryPoints"); const entryKeys: string[] = [];
   if (entryValues.length === 0) throw new TypeError("GpuInterfaceManifest.entryPoints must not be empty.");
-  entryValues.forEach((item, index) => { const path = `GpuInterfaceManifest.entryPoints[${index}]`; const entry = object(item, path); exact(entry, ["moduleId", "name", "stage", "inputs", "outputs", "bindingKeys", "overrideNames", "workgroupSize", "workgroupStorageSize"], path); const moduleId = token(entry.moduleId, `${path}.moduleId`); if (!moduleSet.has(moduleId)) throw new TypeError(`${path}.moduleId is missing.`); const stage = enumeration(entry.stage, stages, `${path}.stage`); entryKeys.push(`${moduleId}:${stage}:${token(entry.name, `${path}.name`)}`); for (const ioKey of ["inputs", "outputs"] as const) { const ios = array(entry[ioKey], `${path}.${ioKey}`).map((value, ioIndex) => entryIo(value, `${path}.${ioKey}[${ioIndex}]`)); unique(ios, (io) => `${io.locationKind}:${io.location}`, `${path}.${ioKey}`); } const resources = tokenArray(entry.bindingKeys, `${path}.bindingKeys`); resources.forEach((key) => { if (!bindingSet.has(key)) throw new TypeError(`${path}.bindingKeys references missing ${key}.`); }); const names = tokenArray(entry.overrideNames, `${path}.overrideNames`); names.forEach((name) => { if (!overrideSet.has(`${moduleId}:${name}`)) throw new TypeError(`${path}.overrideNames references missing ${name}.`); }); if (stage === "compute") { const dimensions = array(entry.workgroupSize, `${path}.workgroupSize`, 3); if (dimensions.length !== 3) throw new TypeError(`${path}.workgroupSize must have three dimensions.`); dimensions.forEach((value, dimensionIndex) => { const dimensionPath = `${path}.workgroupSize[${dimensionIndex}]`; const dimension = object(value, dimensionPath); const kind = enumeration(dimension.kind, ["literal", "override"] as const, `${dimensionPath}.kind`); if (kind === "literal") { exact(dimension, ["kind", "value"], dimensionPath); integer(dimension.value, `${dimensionPath}.value`, 1); } else { exact(dimension, ["kind", "name"], dimensionPath); const name = token(dimension.name, `${dimensionPath}.name`); if (!overrideSet.has(`${moduleId}:${name}`)) throw new TypeError(`${dimensionPath} references missing override.`); } }); integer(entry.workgroupStorageSize, `${path}.workgroupStorageSize`); } else if (entry.workgroupSize !== null || entry.workgroupStorageSize !== null) throw new TypeError(`${path} workgroup metadata is only valid for compute.`); });
+  entryValues.forEach((item, index) => { const path = `GpuInterfaceManifest.entryPoints[${index}]`; const entry = object(item, path); exact(entry, ["moduleId", "name", "stage", "inputs", "outputs", "bindingKeys", "overrideNames", "workgroupSize", "workgroupStorageSize"], path); const moduleId = token(entry.moduleId, `${path}.moduleId`); if (!moduleSet.has(moduleId)) throw new TypeError(`${path}.moduleId is missing.`); const stage = enumeration(entry.stage, stages, `${path}.stage`); entryKeys.push(`${moduleId}:${stage}:${wgslIdentifier(entry.name, `${path}.name`)}`); for (const ioKey of ["inputs", "outputs"] as const) { const ios = array(entry[ioKey], `${path}.${ioKey}`).map((value, ioIndex) => entryIo(value, `${path}.${ioKey}[${ioIndex}]`)); unique(ios, (io) => `${io.locationKind}:${io.location}`, `${path}.${ioKey}`); } const resources = tokenArray(entry.bindingKeys, `${path}.bindingKeys`); resources.forEach((key) => { if (!bindingSet.has(key)) throw new TypeError(`${path}.bindingKeys references missing ${key}.`); }); const names = identifierArray(entry.overrideNames, `${path}.overrideNames`); names.forEach((name) => { if (!overrideSet.has(`${moduleId}:${name}`)) throw new TypeError(`${path}.overrideNames references missing ${name}.`); }); if (stage === "compute") { const dimensions = array(entry.workgroupSize, `${path}.workgroupSize`, 3); if (dimensions.length !== 3) throw new TypeError(`${path}.workgroupSize must have three dimensions.`); dimensions.forEach((value, dimensionIndex) => { const dimensionPath = `${path}.workgroupSize[${dimensionIndex}]`; const dimension = object(value, dimensionPath); const kind = enumeration(dimension.kind, ["literal", "override"] as const, `${dimensionPath}.kind`); if (kind === "literal") { exact(dimension, ["kind", "value"], dimensionPath); integer(dimension.value, `${dimensionPath}.value`, 1); } else { exact(dimension, ["kind", "name"], dimensionPath); const name = wgslIdentifier(dimension.name, `${dimensionPath}.name`); if (!overrideSet.has(`${moduleId}:${name}`)) throw new TypeError(`${dimensionPath} references missing override.`); } }); integer(entry.workgroupStorageSize, `${path}.workgroupStorageSize`); } else if (entry.workgroupSize !== null || entry.workgroupStorageSize !== null) throw new TypeError(`${path} workgroup metadata is only valid for compute.`); });
   unique(entryKeys, String, "GpuInterfaceManifest.entryPoints"); const entrySet = new Set(entryKeys);
   const vertexValues = array(input.vertexInputs, "GpuInterfaceManifest.vertexInputs"); const vertexKeys: string[] = []; const parsedVertices: UnknownRecord[] = [];
   vertexValues.forEach((item, index) => { const path = `GpuInterfaceManifest.vertexInputs[${index}]`; const vertex = vertexInput(item, path); parsedVertices.push(vertex); if (!entrySet.has(`${vertex.moduleId}:vertex:${vertex.entryPoint}`)) throw new TypeError(`${path} references missing vertex entry point.`); vertexKeys.push(`${vertex.pipelineId}:${vertex.shaderLocation}`); }); unique(vertexKeys, String, "GpuInterfaceManifest.vertexInputs");
   const model = object(input.modelAbi, "GpuInterfaceManifest.modelAbi"); exact(model, ["recordNames", "bindings", "vertexInputs", "semantics"], "GpuInterfaceManifest.modelAbi");
-  tokenArray(model.recordNames, "GpuInterfaceManifest.modelAbi.recordNames").forEach((name) => { if (!records.has(name)) throw new TypeError(`Model ABI references missing record ${name}.`); });
+  identifierArray(model.recordNames, "GpuInterfaceManifest.modelAbi.recordNames").forEach((name) => { if (!records.has(name)) throw new TypeError(`Model ABI references missing record ${name}.`); });
   const modelBindings = array(model.bindings, "GpuInterfaceManifest.modelAbi.bindings").map((item, index) => binding(item, `GpuInterfaceManifest.modelAbi.bindings[${index}]`, false));
   for (const [index, projected] of modelBindings.entries()) { const source = projected.source as UnknownRecord; const reflectedIndex = bindingKeys.indexOf(`${source.moduleId}:${source.group}:${source.binding}`); const reflected = reflectedIndex < 0 ? null : object(bindingValues[reflectedIndex], `GpuInterfaceManifest.bindings[${reflectedIndex}]`); if (!reflected || canonicalizeForValidation(reflected.resource) !== canonicalizeForValidation(projected.resource)) throw new TypeError(`GpuInterfaceManifest.modelAbi.bindings[${index}] differs from its reflected source.`); const resource = projected.resource as GpuBindingResourceLayout; if (resource.kind === "buffer" && resource.recordName === null) throw new TypeError(`GpuInterfaceManifest.modelAbi.bindings[${index}] must use a named WGSL record root.`); }
   const modelBindingSemantics = modelBindings.filter((item) => item.semantic !== null).map((item) => String(item.semantic)); unique(modelBindingSemantics, String, "GpuInterfaceManifest.modelAbi.bindings semantics");
