@@ -16,7 +16,9 @@ not manually create a versioned release section.
   - (placeholder)
 
 - **Fixed**
-  - (placeholder)
+  - Preserve legal underscore-prefixed WGSL source names across reflected records,
+    selectors, overrides, generated artifacts and codecs without weakening contract
+    token validation; reject malformed and reserved names in the supported ASCII profile.
 
 - **Security**
   - (placeholder)

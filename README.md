@@ -30,6 +30,13 @@ host-shareable layout and carries that truth through model storage and runtime:
 Only WGSL is in scope. GLSL, SPIR-V, caller-supplied byte layouts, arbitrary
 Blob URLs, and executable qualification bundles are rejected by design.
 
+Source names use a distinct, bounded ASCII WGSL identifier profile: legal names
+such as `_pad0` are preserved in reflection, generated schemas and codecs. Lone
+underscores, double-underscore prefixes, keywords and reserved words are rejected.
+Contract IDs and semantic tokens retain their separate grammar. Unicode source
+identifiers are not yet qualified by the reflection framework; this is not a claim
+of complete Unicode WGSL support. See [ADR 0006](docs/adrs/adr-0006-source-identifiers-are-not-contract-tokens.md).
+
 ## Package boundaries
 
 The package has three explicit exports:
