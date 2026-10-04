@@ -364,7 +364,7 @@ describe("style preparation descriptor and cleanup edge coverage", () => {
       const group = pipeline.layout.bindGroups[0]! as Mutable<typeof pipeline.layout.bindGroups[number]>;
       group.entries = [...group.entries, { group: 0, binding: 1, resource, visibility: ["compute"] }];
       const reflectedBinding = clone(shader.gpuInterface.bindings[0]!) as Mutable<typeof shader.gpuInterface.bindings[number]>;
-      reflectedBinding.variableName = `coverage_${resource.kind}`;
+      reflectedBinding.variableName = `coverage_${resource.kind.replaceAll("-", "_")}`;
       reflectedBinding.binding = 1;
       reflectedBinding.resource = resource;
       (shader.gpuInterface as Mutable<typeof shader.gpuInterface>).bindings = [
@@ -444,8 +444,8 @@ describe("style preparation descriptor and cleanup edge coverage", () => {
     const vector = { kind: "vector" as const, scalar: "f32" as const, width: 4 as const, alignment: 16, byteSize: 16 };
     (shader.gpuInterface as Mutable<typeof shader.gpuInterface>).entryPoints = [
       ...shader.gpuInterface.entryPoints,
-      { moduleId: "compute", name: "vertexMain", stage: "vertex", inputs: [{ name: "position", locationKind: "location", location: 0, interpolation: null, type: vector }], outputs: [{ name: "varying", locationKind: "location", location: 0, interpolation: null, type: vector }], bindingKeys: [], overrideNames: [], workgroupSize: null, workgroupStorageSize: null },
-      { moduleId: "compute", name: "fragmentMain", stage: "fragment", inputs: [{ name: "varying", locationKind: "location", location: 0, interpolation: null, type: vector }], outputs: [{ name: "color", locationKind: "location", location: 0, interpolation: null, type: vector }], bindingKeys: [], overrideNames: [], workgroupSize: null, workgroupStorageSize: null },
+      { moduleId: "compute", name: "vertexMain", stage: "vertex", inputs: [{ name: "position", locationKind: "location", location: 0, interpolation: null, type: vector }], outputs: [{ name: "varyingValue", locationKind: "location", location: 0, interpolation: null, type: vector }], bindingKeys: [], overrideNames: [], workgroupSize: null, workgroupStorageSize: null },
+      { moduleId: "compute", name: "fragmentMain", stage: "fragment", inputs: [{ name: "varyingValue", locationKind: "location", location: 0, interpolation: null, type: vector }], outputs: [{ name: "color", locationKind: "location", location: 0, interpolation: null, type: vector }], bindingKeys: [], overrideNames: [], workgroupSize: null, workgroupStorageSize: null },
     ];
     const exactLimits = shader.manifest.requirements.limits;
     (shader.manifest.requirements as Mutable<typeof shader.manifest.requirements>).limits = exactLimits.filter(
