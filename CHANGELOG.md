@@ -9,6 +9,20 @@ not manually create a versioned release section.
 
 ## [Unreleased]
 
+- **Added**
+  - (placeholder)
+
+- **Changed**
+  - (placeholder)
+
+- **Fixed**
+  - (placeholder)
+
+- **Security**
+  - (placeholder)
+
+## [0.1.12] - 2026-11-22
+
 - Refresh supported npm dependency and security tooling baselines; preserve runtime API contracts (weekly maintenance, 2026-11-22).
 
 - **Added**
@@ -328,7 +342,7 @@ not manually create a versioned release section.
 - Codecov uses OIDC and release/maintenance actions are pinned to reviewed
   Node-24-compatible revisions.
 
-[Unreleased]: https://github.com/Plasius-LTD/gpu-shader/compare/v0.1.11...HEAD
+[Unreleased]: https://github.com/Plasius-LTD/gpu-shader/compare/v0.1.12...HEAD
 
 
 [0.1.0]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.0
@@ -343,3 +357,4 @@ not manually create a versioned release section.
 [0.1.9]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.9
 [0.1.10]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.10
 [0.1.11]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.11
+[0.1.12]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.12
