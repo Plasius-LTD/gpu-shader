@@ -73,8 +73,13 @@
   "dependencies": {
     "wgsl_reflect": "1.5.0"
   },
-  "optionalDependencies": {
+  "peerDependencies": {
     "playwright-core": "1.62.1"
+  },
+  "peerDependenciesMeta": {
+    "playwright-core": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -84,6 +89,7 @@
     "@vitest/coverage-v8": "^5.1.1",
     "eslint": "^10.15.0",
     "globals": "^17.14.0",
+    "playwright-core": "1.62.1",
     "rimraf": "^6.1.4",
     "tsup": "^9.0.0",
     "typescript": "^6.0.3",

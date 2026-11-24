@@ -9,3 +9,4 @@
 Accepted ADRs are historical records. Supersede a decision with a new ADR
 rather than rewriting the old decision in place.
 - [ADR-0005: Hosted OIDC Package Publication](./adr-0005-hosted-oidc-package-publication.md)
+- [ADR 0006: Qualification automation is an explicit optional peer](adr-0006-qualification-automation-is-an-explicit-peer.md)

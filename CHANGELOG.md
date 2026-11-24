@@ -9,6 +9,11 @@ not manually create a versioned release section.
 
 ## [Unreleased]
 
+- Keep qualification-only Playwright out of ordinary runtime installations by
+  making its exact pin an optional peer and retaining it for development tests.
+  Verify the installed adapter identity/version before its integrity hash; keep
+  all qualification and hardware gates unchanged (#49).
+
 - **Added**
   - (placeholder)
 
