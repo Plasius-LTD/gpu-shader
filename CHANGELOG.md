@@ -9,6 +9,20 @@ not manually create a versioned release section.
 
 ## [Unreleased]
 
+- **Added**
+  - (placeholder)
+
+- **Changed**
+  - (placeholder)
+
+- **Fixed**
+  - (placeholder)
+
+- **Security**
+  - (placeholder)
+
+## [0.1.13] - 2026-11-24
+
 - Keep qualification-only Playwright out of ordinary runtime installations by
   making its exact pin an optional peer and retaining it for development tests.
   Verify the installed adapter identity/version before its integrity hash; keep
@@ -347,7 +361,7 @@ not manually create a versioned release section.
 - Codecov uses OIDC and release/maintenance actions are pinned to reviewed
   Node-24-compatible revisions.
 
-[Unreleased]: https://github.com/Plasius-LTD/gpu-shader/compare/v0.1.12...HEAD
+[Unreleased]: https://github.com/Plasius-LTD/gpu-shader/compare/v0.1.13...HEAD
 
 
 [0.1.0]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.0
@@ -363,3 +377,4 @@ not manually create a versioned release section.
 [0.1.10]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.10
 [0.1.11]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.11
 [0.1.12]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.12
+[0.1.13]: https://github.com/Plasius-LTD/gpu-shader/releases/tag/v0.1.13
