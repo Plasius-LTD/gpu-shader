@@ -83,6 +83,20 @@ After an approved GitHub CD release publishes the package:
 npm install @plasius/gpu-shader
 ```
 
+Runtime consumers do not install browser automation. Operators running the
+published Playwright qualification adapter must also explicitly install its
+release-pinned optional peer and browser:
+
+```bash
+npm install --save-dev playwright-core@1.62.1
+node node_modules/playwright-core/cli.js install chromium
+```
+
+The repository's development install already includes that exact peer. The trusted
+harness checks its actual installed identity/version before hashing the adapter
+and browser trees. Missing or mismatched automation fails qualification; all
+physical-device gates remain required. See [ADR 0006](docs/adrs/adr-0006-qualification-automation-is-an-explicit-peer.md).
+
 Do not publish from a local machine. Releases are produced only by
 `.github/workflows/cd.yml` from `main` through the protected `production`
 environment.

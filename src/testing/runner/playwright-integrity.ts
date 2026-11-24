@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { lstat, readdir, realpath } from "node:fs/promises";
+import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { basename, dirname, join, relative, sep } from "node:path";
 import { asSha256Hex, computeSha256 } from "../../hash.js";
@@ -58,6 +58,14 @@ export async function observePlaywrightAdapterHarness(executablePath: string): P
 }> {
   const metadata = await readTrustedHarnessPackageMetadata();
   const packageJson = require.resolve("playwright-core/package.json");
+  let installed: unknown;
+  try { installed = JSON.parse(await readFile(packageJson, "utf8")); }
+  catch { throw new TypeError("Installed playwright-core metadata is invalid."); }
+  if (typeof installed !== "object" || installed === null || Array.isArray(installed)
+    || (installed as Record<string, unknown>).name !== "playwright-core"
+    || (installed as Record<string, unknown>).version !== metadata.playwrightCoreVersion) {
+    throw new TypeError("Installed playwright-core does not match the trusted harness pin.");
+  }
   const packageRoot = await realpath(dirname(packageJson));
   const browserRoot = await realpath(chromiumRoot(await realpath(executablePath)));
   const entries = [
